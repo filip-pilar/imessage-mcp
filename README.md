@@ -94,6 +94,10 @@ Live events retain the latest 500 events in memory. Cursors include an opaque
 app-session identity. After a restart, tools return `cursor_expired` instead of
 silently waiting on a stale position; use bounded chat history to recover.
 
+The proxy ignores connection descriptors whose app process no longer exists,
+launches the menu app to replace them, and rejects menu apps from an
+incompatible semantic major version with a clear error.
+
 `wait_for_message` waits only while its MCP call is active and never wakes a
 completed Codex task. It defaults to events arriving after the call begins,
 ignores reactions and other chats, and returns `matched`, `timeout`,

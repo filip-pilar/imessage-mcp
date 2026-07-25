@@ -1,5 +1,6 @@
 import Foundation
 import MessageMCPKit
+import Darwin
 
 private final class LockedBool: @unchecked Sendable {
     private let lock = NSLock()
@@ -12,11 +13,52 @@ private func writeStderr(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
 }
 
-private func loadConnectionInfo() -> ConnectionInfo? {
+private enum ConnectionFileState {
+    case unavailable
+    case stale
+    case incompatible(appVersion: String)
+    case ready(ConnectionInfo)
+}
+
+private enum ProxyStartupError: LocalizedError {
+    case staleConnectionFile
+    case incompatibleVersion(proxy: String, app: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .staleConnectionFile:
+            return "the saved menu-app connection is stale and no running compatible app replaced it"
+        case let .incompatibleVersion(proxy, app):
+            return "proxy version \(proxy) is incompatible with menu-app version \(app); install matching major versions"
+        }
+    }
+}
+
+private func processIsRunning(_ pid: Int32) -> Bool {
+    guard pid > 0 else { return false }
+    if kill(pid, 0) == 0 { return true }
+    return errno == EPERM
+}
+
+private func loadConnectionInfo() -> ConnectionFileState {
     let file = ProcessInfo.processInfo.environment["IMESSAGE_MCP_CONNECTION_FILE"]
         .map { URL(fileURLWithPath: $0) } ?? AppPaths.connectionFile
-    guard let data = try? Data(contentsOf: file) else { return nil }
-    return try? JSONDecoder().decode(ConnectionInfo.self, from: data)
+    guard let data = try? Data(contentsOf: file) else { return .unavailable }
+    guard let info = try? JSONDecoder().decode(ConnectionInfo.self, from: data) else {
+        return .stale
+    }
+    switch RuntimeCompatibility.connectionReadiness(
+        info,
+        proxyVersion: MCPProcessor.serverVersion,
+        processIsRunning: processIsRunning
+    ) {
+    case .ready:
+        return .ready(info)
+    case .staleProcess:
+        return .stale
+    case .incompatibleVersion:
+        return .incompatible(appVersion: info.version)
+    }
 }
 
 private func menuAppURL() -> URL? {
@@ -50,13 +92,23 @@ private func connectWithRetry() throws -> (SocketLineConnection, ConnectionInfo)
     var launched = false
     var lastError: Error = UnixSocketError.disconnected
     for _ in 0..<50 {
-        if let info = loadConnectionInfo() {
+        switch loadConnectionInfo() {
+        case let .ready(info):
             do {
                 let connection = try UnixSocketClient.connect(path: info.socketPath)
                 return (connection, info)
             } catch {
                 lastError = error
             }
+        case .stale:
+            lastError = ProxyStartupError.staleConnectionFile
+        case let .incompatible(appVersion):
+            throw ProxyStartupError.incompatibleVersion(
+                proxy: MCPProcessor.serverVersion,
+                app: appVersion
+            )
+        case .unavailable:
+            break
         }
         if !launched {
             launchMenuApp()

@@ -24,6 +24,11 @@ consistent across concurrent MCP clients and allows the live watcher to survive
 individual client restarts. The stdio proxy keeps compatibility with ordinary
 local MCP clients and auto-launches the app.
 
+The proxy treats the connection descriptor as live only while its recorded app
+PID exists. Stale or malformed descriptors are ignored while the app is
+relaunched. Before connecting, the proxy also requires the app and proxy to
+share a semantic major version; minor and patch versions remain wire-compatible.
+
 The broker tracks authenticated sessions by client-provided MCP name and
 connection time. The UI distinguishes active sessions from configured clients
 that connect only on demand and retains the latest connection time for context.

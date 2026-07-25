@@ -14,6 +14,45 @@ public struct ConnectionInfo: Codable, Equatable, Sendable {
     }
 }
 
+public enum ConnectionInfoReadiness: Equatable, Sendable {
+    case ready
+    case staleProcess
+    case incompatibleVersion
+}
+
+public enum RuntimeCompatibility {
+    public static func connectionReadiness(
+        _ info: ConnectionInfo,
+        proxyVersion: String,
+        processIsRunning: (Int32) -> Bool
+    ) -> ConnectionInfoReadiness {
+        guard processIsRunning(info.appPID) else { return .staleProcess }
+        guard versionsAreCompatible(proxyVersion: proxyVersion, appVersion: info.version) else {
+            return .incompatibleVersion
+        }
+        return .ready
+    }
+
+    public static func versionsAreCompatible(proxyVersion: String, appVersion: String) -> Bool {
+        guard let proxyMajor = semanticMajor(proxyVersion),
+              let appMajor = semanticMajor(appVersion) else {
+            return false
+        }
+        return proxyMajor == appMajor
+    }
+
+    private static func semanticMajor(_ version: String) -> Int? {
+        let core = version.prefix { $0 != "-" && $0 != "+" }
+        let components = core.split(separator: ".", omittingEmptySubsequences: false)
+        guard components.count == 3,
+              components.allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isNumber) }),
+              let major = Int(components[0]) else {
+            return nil
+        }
+        return major
+    }
+}
+
 public struct MCPClientStatus: Identifiable, Equatable, Sendable {
     public let id: UUID
     public let name: String
