@@ -3,5 +3,7 @@ dist/
 .swiftpm/
 DerivedData/
 Vendor/imsg/
+__pycache__/
+*.pyc
 *.xcuserstate
 .DS_Store

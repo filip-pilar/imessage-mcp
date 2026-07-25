@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "imessage": {
+      "command": "./scripts/launch-imessage-mcp",
+      "cwd": "."
+    }
+  }
+}

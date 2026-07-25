@@ -19,6 +19,8 @@ is the current macOS user account and the MCP clients that user configures.
 - Optional reaction GUID freshness prevents reacting after the target changes.
 - Advanced SIP-disabled bridge functionality is neither bundled nor exposed.
 - Activity logs omit message bodies.
+- Distribution archives omit extended attributes, AppleDouble files, Finder
+  metadata, and quarantine metadata.
 
 ## Trust assumptions
 
@@ -34,6 +36,11 @@ The app delegates delivery to Messages and imsg. A successful automation call
 does not prove human receipt. Use returned GUIDs and `get_send_status`, while
 recognizing that carrier, device, and recipient read-receipt settings remain
 outside this app's control.
+
+Current distribution archives are local/private development artifacts. Their
+ad-hoc signatures are suitable for local verification only; they must not be
+published as trusted macOS software before stable Developer ID signing and
+notarization are implemented.
 
 Report security issues privately to the repository owner. Do not include real
 message bodies, addresses, phone numbers, attachment contents, or connection

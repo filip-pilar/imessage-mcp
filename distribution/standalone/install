@@ -1,0 +1,105 @@
+#!/bin/sh
+set -eu
+
+PACKAGE_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+project_path=""
+install_skill=1
+allow_plugin_overlap=0
+
+usage() {
+    echo "Usage: ./install --project /absolute/project/path [--mcp-only] [--allow-plugin-overlap]" >&2
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --project)
+            [ "$#" -ge 2 ] || { usage; exit 2; }
+            project_path=$2
+            shift 2
+            ;;
+        --mcp-only)
+            install_skill=0
+            shift
+            ;;
+        --with-skill)
+            install_skill=1
+            shift
+            ;;
+        --allow-plugin-overlap)
+            allow_plugin_overlap=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            usage
+            exit 2
+            ;;
+    esac
+done
+
+if [ -z "$project_path" ] || [ ! -d "$project_path" ]; then
+    echo "Provide an existing project directory with --project." >&2
+    exit 2
+fi
+
+project_path=$(CDPATH= cd -- "$project_path" && pwd)
+config_dir="$project_path/.codex"
+config_file="$config_dir/config.toml"
+install_root="$config_dir/imessage-mcp"
+launcher_path="$install_root/bin/launch-imessage-mcp"
+escaped_launcher=$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$launcher_path")
+skill_parent="$project_path/.agents/skills"
+skill_destination="$skill_parent/imessage-conversation-watch"
+
+if [ ! -x "$PACKAGE_ROOT/bin/imessage-mcp" ]; then
+    echo "Package is incomplete: bin/imessage-mcp is missing or not executable." >&2
+    exit 1
+fi
+
+if [ "$allow_plugin_overlap" -eq 0 ] && command -v codex >/dev/null 2>&1 \
+    && codex plugin list 2>/dev/null | grep -Eq '^imessage-mcp@.*installed, enabled'; then
+    echo "The iMessage MCP plugin is already enabled. Use either the plugin or the project-scoped installation, not both." >&2
+    echo "Remove the plugin first, or use --allow-plugin-overlap only for a controlled migration test." >&2
+    exit 1
+fi
+
+if [ -f "$config_file" ] && grep -q '^\[mcp_servers\.imessage\]$' "$config_file"; then
+    if ! grep -Fq "command = $escaped_launcher" "$config_file"; then
+        echo "The project already defines mcp_servers.imessage; leaving it unchanged." >&2
+        exit 1
+    fi
+fi
+
+if [ "$install_skill" -eq 1 ] && [ -e "$skill_destination" ] \
+    && ! diff -rq "$PACKAGE_ROOT/skills/imessage-conversation-watch" "$skill_destination" >/dev/null; then
+    echo "The project already has a different imessage-conversation-watch skill; leaving it unchanged." >&2
+    exit 1
+fi
+
+mkdir -p "$install_root/bin"
+cp "$PACKAGE_ROOT/bin/imessage-mcp" "$install_root/bin/imessage-mcp"
+cp "$PACKAGE_ROOT/bin/launch-imessage-mcp" "$launcher_path"
+chmod 755 "$install_root/bin/imessage-mcp" "$launcher_path"
+
+if [ "$install_skill" -eq 1 ]; then
+    mkdir -p "$skill_parent"
+    if [ ! -e "$skill_destination" ]; then
+        cp -R "$PACKAGE_ROOT/skills/imessage-conversation-watch" "$skill_destination"
+    fi
+fi
+
+if [ ! -f "$config_file" ] || ! grep -q '^\[mcp_servers\.imessage\]$' "$config_file"; then
+    mkdir -p "$config_dir"
+    {
+        if [ -s "$config_file" ]; then
+            echo
+        fi
+        echo "[mcp_servers.imessage]"
+        echo "command = $escaped_launcher"
+    } >> "$config_file"
+fi
+
+echo "Installed local/private project-scoped iMessage MCP in $project_path"

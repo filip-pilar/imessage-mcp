@@ -1,0 +1,38 @@
+#!/bin/sh
+set -eu
+
+PLUGIN_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+is_executable() {
+    [ -n "$1" ] && [ -f "$1" ] && [ -x "$1" ]
+}
+
+proxy_path=""
+if [ -n "${IMESSAGE_MCP_PROXY_PATH:-}" ]; then
+    proxy_path=$IMESSAGE_MCP_PROXY_PATH
+elif is_executable "$PLUGIN_ROOT/bin/imessage-mcp"; then
+    proxy_path="$PLUGIN_ROOT/bin/imessage-mcp"
+elif is_executable "$PLUGIN_ROOT/../../../../dist/imessage-mcp"; then
+    proxy_path="$PLUGIN_ROOT/../../../../dist/imessage-mcp"
+fi
+
+if [ -z "$proxy_path" ]; then
+    echo "iMessage MCP proxy not found. Rebuild the private package or set IMESSAGE_MCP_PROXY_PATH." >&2
+    exit 1
+fi
+
+if [ "${IMESSAGE_MCP_SKIP_APP_LAUNCH:-0}" != "1" ]; then
+    for app_path in \
+        "${IMESSAGE_MCP_APP_PATH:-}" \
+        "/Applications/iMessage MCP.app" \
+        "$HOME/Applications/iMessage MCP.app" \
+        "$PLUGIN_ROOT/../../../../dist/iMessage MCP.app"
+    do
+        if [ -n "$app_path" ] && [ -d "$app_path" ]; then
+            /usr/bin/open -g "$app_path" >/dev/null 2>&1 || true
+            break
+        fi
+    done
+fi
+
+exec "$proxy_path" "$@"

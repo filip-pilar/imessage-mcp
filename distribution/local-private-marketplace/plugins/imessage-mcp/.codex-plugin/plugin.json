@@ -1,0 +1,27 @@
+{
+  "name": "imessage-mcp",
+  "version": "1.0.0-local.1",
+  "description": "Private local Messages access with guarded sends, tapbacks, and bounded conversation watching.",
+  "author": {
+    "name": "Forma"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "iMessage MCP (Local)",
+    "shortDescription": "Private local build; not notarized",
+    "longDescription": "Private local package for connecting Codex to the separately installed iMessage MCP menu app. Keep local until stable signing and notarization are complete.",
+    "developerName": "Forma",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Check whether my iMessage MCP setup is ready.",
+      "List my 10 most recent Messages chats.",
+      "Watch a specific conversation for its next reply."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

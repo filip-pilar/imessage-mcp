@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+import argparse
+import filecmp
+import json
+import os
+from pathlib import Path
+import shutil
+import stat
+import sys
+
+
+def directories_match(left: Path, right: Path) -> bool:
+    comparison = filecmp.dircmp(left, right, ignore=[".DS_Store"])
+    if comparison.left_only or comparison.right_only or comparison.funny_files:
+        return False
+    _, mismatch, errors = filecmp.cmpfiles(
+        left,
+        right,
+        comparison.common_files,
+        shallow=False,
+    )
+    if mismatch or errors:
+        return False
+    return all(
+        directories_match(left / name, right / name)
+        for name in comparison.common_dirs
+    )
+
+
+def remove_owned_config(config_file: Path, expected_command: str) -> None:
+    if not config_file.exists():
+        return
+
+    original = config_file.read_text(encoding="utf-8")
+    lines = original.splitlines(keepends=True)
+    start = next(
+        (index for index, line in enumerate(lines)
+         if line.strip() == "[mcp_servers.imessage]"),
+        None,
+    )
+    if start is None:
+        return
+
+    end = start + 1
+    while end < len(lines) and not lines[end].lstrip().startswith("["):
+        end += 1
+
+    command_line = f"command = {json.dumps(expected_command)}"
+    if not any(line.strip() == command_line for line in lines[start:end]):
+        raise RuntimeError(
+            "mcp_servers.imessage is no longer owned by this standalone "
+            "installation; leaving it unchanged"
+        )
+
+    while start > 0 and lines[start - 1].strip() == "":
+        start -= 1
+    updated = "".join(lines[:start] + lines[end:])
+    mode = stat.S_IMODE(config_file.stat().st_mode)
+    temporary = config_file.with_name(config_file.name + ".imessage-mcp.tmp")
+    temporary.write_text(updated, encoding="utf-8")
+    os.chmod(temporary, mode)
+    os.replace(temporary, config_file)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Remove the local/private project-scoped iMessage MCP."
+    )
+    parser.add_argument("--project", required=True)
+    args = parser.parse_args()
+
+    package_root = Path(__file__).resolve().parent
+    project = Path(os.path.abspath(os.path.expanduser(args.project)))
+    if not project.is_dir():
+        print("Provide an existing project directory with --project.", file=sys.stderr)
+        return 2
+    config_dir = project / ".codex"
+    install_root = config_dir / "imessage-mcp"
+    launcher = install_root / "bin" / "launch-imessage-mcp"
+    config_file = config_dir / "config.toml"
+    skill_source = package_root / "skills" / "imessage-conversation-watch"
+    skill_destination = (
+        project / ".agents" / "skills" / "imessage-conversation-watch"
+    )
+
+    try:
+        remove_owned_config(config_file, str(launcher))
+    except RuntimeError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+
+    if install_root.exists():
+        shutil.rmtree(install_root)
+
+    if skill_destination.exists() and skill_source.exists():
+        if directories_match(skill_source, skill_destination):
+            shutil.rmtree(skill_destination)
+        else:
+            print(
+                "Preserved modified imessage-conversation-watch skill: "
+                f"{skill_destination}",
+                file=sys.stderr,
+            )
+
+    for directory in [
+        project / ".agents" / "skills",
+        project / ".agents",
+    ]:
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+
+    print(f"Removed local/private project-scoped iMessage MCP from {project}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

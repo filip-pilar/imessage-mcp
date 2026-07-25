@@ -16,7 +16,7 @@ cleanup() {
     kill "$APP_PID" 2>/dev/null || true
     wait "$APP_PID" 2>/dev/null || true
   fi
-  rm -rf "$TEMP"
+  /bin/rm -rf "$TEMP"
 }
 trap cleanup EXIT INT TERM
 

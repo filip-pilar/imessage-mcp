@@ -1,0 +1,20 @@
+{
+  "name": "imessage-mcp-local",
+  "interface": {
+    "displayName": "iMessage MCP Local (Private)"
+  },
+  "plugins": [
+    {
+      "name": "imessage-mcp",
+      "source": {
+        "source": "local",
+        "path": "./plugins/imessage-mcp"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

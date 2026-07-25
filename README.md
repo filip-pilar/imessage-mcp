@@ -112,6 +112,59 @@ one chat, snapshots a restart-aware cursor, waits for at most 55 seconds per
 call, and reports timeouts or cursor gaps honestly. Watching remains read-only;
 sends and tapbacks always require separate explicit authorization.
 
+## Distribution options
+
+The native menu app is installed separately in both options so rebuilding a
+Codex integration never changes its macOS privacy identity.
+
+### Standalone project scope
+
+Keep direct MCP and skill control per project. Build both self-contained
+archives without rebuilding the menu app:
+
+```bash
+./scripts/package-distributions.sh --skip-build
+```
+
+Then unpack `dist/imessage-mcp-standalone-local-private.zip` and run:
+
+```bash
+./install --project "/absolute/path/to/project"
+```
+
+Add `--mcp-only` when the project should receive the MCP without the
+conversation-watch skill. Existing, different `mcp_servers.imessage`
+configuration is never overwritten. The installer also refuses to create a
+duplicate tool surface while the plugin is enabled. Run the packaged
+`uninstall` command to remove only standalone-owned files.
+
+### Plugin package
+
+`dist/imessage-mcp-local-private.zip` is a ready-to-add local marketplace
+containing the MCP proxy and conversation-watch skill. After unzipping, change
+to the directory containing `imessage-mcp-local-private` and run:
+
+```bash
+PLUGIN_MARKETPLACE="$(pwd)/imessage-mcp-local-private"
+codex plugin marketplace add "$PLUGIN_MARKETPLACE"
+codex plugin add imessage-mcp@imessage-mcp-local
+```
+
+Start a fresh Codex task afterward. Exact removal commands are included in the
+archive README. The plugin launcher looks for the separately installed menu
+app in `/Applications` or `~/Applications`; `IMESSAGE_MCP_APP_PATH` can
+identify another unchanged location.
+
+Both archives are explicitly local/private, ad-hoc signed, and not notarized.
+Do not publish or share them until stable Developer ID signing and notarization
+are implemented. Do not enable both distributions in the same Codex task
+except for a controlled migration test.
+
+The project-scoped skill is canonical. Run
+`./scripts/sync-distributions.sh` after editing it, and
+`./scripts/sync-distributions.sh --check` in validation to prevent the plugin
+copy from drifting.
+
 ## Write policy
 
 The menu presents three clear write modes:
@@ -180,6 +233,7 @@ debounced to avoid rewriting the activity file for every burst. It is kept local
 swift test
 ./scripts/build-app.sh
 ./scripts/smoke-app.sh
+./scripts/test-distributions.sh
 ```
 
 `build-app.sh` creates a universal arm64/x86_64 app, downloads the pinned imsg
