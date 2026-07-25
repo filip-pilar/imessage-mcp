@@ -1,0 +1,7 @@
+interface:
+  display_name: "iMessage Conversation Watch"
+  short_description: "Wait safely for the next reply in one Messages chat"
+  default_prompt: "Use $imessage-conversation-watch to watch a specific Messages conversation for its next incoming reply."
+
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,67 @@
+#!/bin/sh
+set -eu
+
+command=${1:-}
+case "$command" in
+  --version)
+    echo "0.13.3"
+    ;;
+  watch)
+    trap 'exit 0' TERM INT
+    while :; do sleep 30; done
+    ;;
+  rpc)
+    IFS= read -r request
+    case "$request" in
+      *message.send_status*)
+        echo '{"jsonrpc":"2.0","id":1,"result":{"status":"delivered"}}'
+        ;;
+      *messages.stats*)
+        echo '{"jsonrpc":"2.0","id":1,"result":{"messages":2}}'
+        ;;
+      *)
+        echo '{"jsonrpc":"2.0","id":1,"result":{"ok":true}}'
+        ;;
+    esac
+    ;;
+  status)
+    echo '{"ok":true,"advanced":false}'
+    ;;
+  chats)
+    echo '{"id":42,"name":"Fixture Chat","service":"iMessage","unread_count":1}'
+    ;;
+  history)
+    echo '{"guid":"fixture-guid","chat_id":42,"text":"Fixture message","is_from_me":false}'
+    ;;
+  group)
+    echo '{"chat_id":42,"name":"Fixture Chat","participants":["fixture@example.com"]}'
+    ;;
+  search)
+    echo '{"guid":"fixture-guid","chat_id":42,"text":"Fixture message"}'
+    ;;
+  scheduled)
+    echo '{"ok":true,"messages":[]}'
+    ;;
+  account)
+    echo '{"ok":true,"accounts":["fixture@example.com"],"source":"local"}'
+    ;;
+  whois)
+    echo '{"ok":true,"service":"imessage","source":"local"}'
+    ;;
+  nickname)
+    echo '{"ok":true,"name":"Fixture Person","source":"contacts"}'
+    ;;
+  chat-background)
+    echo '{"ok":true,"chat_id":42,"background_set":false}'
+    ;;
+  send)
+    echo '{"status":"sent","guid":"fixture-outgoing-guid"}'
+    ;;
+  react)
+    echo '{"ok":true,"reaction":"like"}'
+    ;;
+  *)
+    echo "unsupported fake imsg command: $command" >&2
+    exit 2
+    ;;
+esac
