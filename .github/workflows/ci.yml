@@ -20,4 +20,4 @@ jobs:
         run: sudo xcode-select --switch /Applications/Xcode_26.2.app
 
       - name: Run repository checks
-        run: ./scripts/check.sh
+        run: ./scripts/check.sh --xcodebuild-tests

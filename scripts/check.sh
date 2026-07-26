@@ -15,6 +15,26 @@ fi
 
 "$ROOT/scripts/check-versions.sh"
 "$ROOT/scripts/sync-distributions.sh" --check
-swift test --package-path "$ROOT"
+
+case "${1:-}" in
+    "")
+        swift test --package-path "$ROOT"
+        ;;
+    --xcodebuild-tests)
+        (
+            cd "$ROOT"
+            xcodebuild \
+                -scheme iMessageMCP-Package \
+                -destination "platform=macOS" \
+                -parallel-testing-enabled NO \
+                -quiet \
+                test
+        )
+        ;;
+    *)
+        echo "Usage: $0 [--xcodebuild-tests]" >&2
+        exit 2
+        ;;
+esac
 
 echo "Repository checks passed."
