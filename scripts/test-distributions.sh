@@ -17,7 +17,7 @@ marketplace_name=$(python3 "$PLUGIN_CREATOR/scripts/read_marketplace_name.py" \
     --marketplace-path "$MARKETPLACE_SOURCE/.agents/plugins/marketplace.json")
 test "$marketplace_name" = "imessage-mcp-local"
 
-"$ROOT/scripts/package-distributions.sh" --skip-build
+"$ROOT/scripts/package-distributions.sh"
 test -s "$PLUGIN_ARCHIVE"
 test -s "$STANDALONE_ARCHIVE"
 

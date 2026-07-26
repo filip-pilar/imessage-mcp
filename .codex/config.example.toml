@@ -1,0 +1,5 @@
+# Copy this file to config.toml only when developing this repository directly.
+# Replace the command with the absolute path produced by:
+#   ./scripts/build-proxy.sh
+[mcp_servers.imessage]
+command = "/absolute/path/to/imessage-mcp/dist/imessage-mcp"

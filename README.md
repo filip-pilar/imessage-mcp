@@ -19,7 +19,7 @@ Build the app:
 Open its menu:
 
 ```bash
-open "/Users/phil/Documents/forma-code/imessage-mcp/dist/iMessage MCP.app"
+open "$(pwd)/dist/iMessage MCP.app"
 ```
 
 Build the standalone proxy without rebuilding or re-signing the menu app:
@@ -31,8 +31,13 @@ Build the standalone proxy without rebuilding or re-signing the menu app:
 Register that proxy with Codex:
 
 ```bash
-codex mcp add imessage -- "/Users/phil/Documents/forma-code/imessage-mcp/dist/imessage-mcp"
+codex mcp add imessage -- "$(pwd)/dist/imessage-mcp"
 ```
+
+Run these commands from the repository root. For a persistent project-local
+development setup, copy `.codex/config.example.toml` to `.codex/config.toml`
+and replace its placeholder with the absolute proxy path. The personal
+`config.toml` is intentionally ignored.
 
 The standalone proxy starts the unchanged sibling menu app automatically when
 an MCP client connects.
@@ -230,7 +235,14 @@ debounced to avoid rewriting the activity file for every burst. It is kept local
 ## Development and verification
 
 ```bash
-swift test
+./scripts/check.sh
+```
+
+`check.sh` verifies shell syntax, portable configuration, synchronized versions
+and skill copies, then runs the Swift test suite. Changes to packaging or the
+native app need the additional focused checks below:
+
+```bash
 ./scripts/build-app.sh
 ./scripts/smoke-app.sh
 ./scripts/test-distributions.sh

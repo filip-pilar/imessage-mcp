@@ -3,6 +3,7 @@ dist/
 .swiftpm/
 DerivedData/
 Vendor/imsg/
+.codex/config.toml
 __pycache__/
 *.pyc
 *.xcuserstate
