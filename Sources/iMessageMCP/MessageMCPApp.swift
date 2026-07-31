@@ -27,7 +27,21 @@ struct MessageMCPMenuApp: App {
             MenuView()
                 .environmentObject(delegate.model)
         } label: {
-            Image(systemName: delegate.model.approvals.isEmpty ? "message.fill" : "exclamationmark.message.fill")
+            HStack(spacing: 3) {
+                Image(systemName: delegate.model.approvals.isEmpty
+                    ? "message.fill"
+                    : "exclamationmark.message.fill")
+                if !delegate.model.approvals.isEmpty {
+                    Text(delegate.model.approvals.count > 9
+                        ? "9+"
+                        : "\(delegate.model.approvals.count)")
+                        .font(.caption2.weight(.semibold))
+                        .monospacedDigit()
+                }
+            }
+            .accessibilityLabel(delegate.model.approvals.isEmpty
+                ? "iMessage MCP"
+                : "\(delegate.model.approvals.count) pending approvals")
         }
         .menuBarExtraStyle(.window)
 

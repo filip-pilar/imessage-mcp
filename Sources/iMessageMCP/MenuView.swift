@@ -203,15 +203,27 @@ struct MenuView: View {
     }
 
     private var appSection: some View {
-        settingRow(
-            title: "Open at login",
-            subtitle: "Keeps live updates available after restart",
-            icon: "arrow.clockwise",
-            isOn: Binding(
-                get: { model.launchAtLoginEnabled },
-                set: { model.setLaunchAtLogin($0) }
+        VStack(spacing: 0) {
+            settingRow(
+                title: "Approval notifications",
+                subtitle: "Shows a generic alert when approval is waiting",
+                icon: "bell.badge",
+                isOn: Binding(
+                    get: { model.settings.approvalNotificationsEnabled },
+                    set: { model.setApprovalNotifications($0) }
+                )
             )
-        )
+            rowDivider
+            settingRow(
+                title: "Open at login",
+                subtitle: "Keeps live updates available after restart",
+                icon: "arrow.clockwise",
+                isOn: Binding(
+                    get: { model.launchAtLoginEnabled },
+                    set: { model.setLaunchAtLogin($0) }
+                )
+            )
+        }
     }
 
     private var permissionNote: some View {

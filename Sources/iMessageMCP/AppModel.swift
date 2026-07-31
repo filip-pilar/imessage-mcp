@@ -170,6 +170,7 @@ final class AppModel: ObservableObject {
     private let activityStore = ActivityStore()
     private let eventStore = EventStore()
     private let approvalCenter = ApprovalCenter()
+    private let approvalNotifications = ApprovalNotificationCoordinator()
     private let runtimeStatus = RuntimeStatusStore()
     private var broker: BrokerServer?
     private var watcher: WatchService?
@@ -181,6 +182,9 @@ final class AppModel: ObservableObject {
         settings = settingsStore.value
         activities = activityStore.recent
         launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
+        approvalNotifications.onError = { [weak self] message in
+            self?.actionError = message
+        }
         activityStore.onChange = { [weak self] entries in
             DispatchQueue.main.async {
                 self?.activities = entries
@@ -194,14 +198,22 @@ final class AppModel: ObservableObject {
         approvalCenter.onChange = { [weak self] requests in
             DispatchQueue.main.async {
                 self?.approvals = requests
-                if !requests.isEmpty {
-                    NSApp.requestUserAttention(.informationalRequest)
-                }
+                self?.approvalNotifications.update(
+                    pendingCount: requests.count,
+                    enabled: self?.settings.approvalNotificationsEnabled == true
+                )
             }
         }
     }
 
     func start() {
+        approvalNotifications.update(
+            pendingCount: approvals.count,
+            enabled: settings.approvalNotificationsEnabled
+        )
+        if settings.approvalNotificationsEnabled {
+            authorizeApprovalNotifications()
+        }
         do {
             try AppPaths.ensureDirectories()
             let imsgURL = try resolveIMsgURL()
@@ -293,6 +305,7 @@ final class AppModel: ObservableObject {
 
     func stop() {
         approvalCenter.denyAll()
+        approvalNotifications.clear()
         watcher?.stop()
         broker?.stop()
         brokerRunning = false
@@ -385,6 +398,15 @@ final class AppModel: ObservableObject {
         updateSettings { $0.confirmReactions = enabled }
     }
 
+    func setApprovalNotifications(_ enabled: Bool) {
+        guard enabled else {
+            updateSettings { $0.approvalNotificationsEnabled = false }
+            approvalNotifications.update(pendingCount: approvals.count, enabled: false)
+            return
+        }
+        authorizeApprovalNotifications()
+    }
+
     func setLiveEvents(_ enabled: Bool) {
         updateSettings { $0.liveEventsEnabled = enabled }
         if enabled && databaseAccess == .granted {
@@ -461,6 +483,24 @@ final class AppModel: ObservableObject {
             actionError = nil
         } catch {
             actionError = error.localizedDescription
+        }
+    }
+
+    private func authorizeApprovalNotifications() {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let granted = try await approvalNotifications.requestAuthorization()
+                updateSettings { $0.approvalNotificationsEnabled = granted }
+                approvalNotifications.update(pendingCount: approvals.count, enabled: granted)
+                if !granted {
+                    actionError = "Approval notifications are disabled in System Settings."
+                }
+            } catch {
+                updateSettings { $0.approvalNotificationsEnabled = false }
+                approvalNotifications.update(pendingCount: approvals.count, enabled: false)
+                actionError = "Could not enable approval notifications: \(error.localizedDescription)"
+            }
         }
     }
 

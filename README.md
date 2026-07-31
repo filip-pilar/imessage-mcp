@@ -180,7 +180,10 @@ The menu presents three clear write modes:
 
 The Settings window can customize message and tapback confirmation separately.
 Approvals show the resolved chat label, the exact preview, and an expiry
-countdown; they time out closed after 120 seconds.
+countdown; they time out closed after 120 seconds. The menu-bar item shows the
+number of pending approvals. Optional local notifications show only a generic
+pending count and batch subsequent count changes without exposing message or
+recipient details.
 
 For the least ambiguous send:
 

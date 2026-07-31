@@ -16,6 +16,8 @@ is the current macOS user account and the MCP clients that user configures.
   configurable in Settings.
 - Confirmed sends and reactions show the resolved target, exact preview, and
   expiry countdown, and time out denied.
+- Optional approval notifications contain only a generic pending count, never
+  message contents or recipient details.
 - Optional reaction GUID freshness prevents reacting after the target changes.
 - Advanced SIP-disabled bridge functionality is neither bundled nor exposed.
 - Activity logs omit message bodies.

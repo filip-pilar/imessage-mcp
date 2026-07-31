@@ -84,6 +84,19 @@ private struct GeneralSettingsView: View {
                             )
                         )
                         .disabled(!model.settings.writesEnabled)
+
+                        Divider()
+
+                        Toggle(
+                            "Notify when approval is waiting",
+                            isOn: Binding(
+                                get: { model.settings.approvalNotificationsEnabled },
+                                set: { model.setApprovalNotifications($0) }
+                            )
+                        )
+                        Text("Shows only a generic approval count. Recipients and message contents never appear in notifications.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                     .padding(8)
                 }

@@ -76,12 +76,42 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var writesEnabled = true
     public var confirmSends = true
     public var confirmReactions = true
+    public var approvalNotificationsEnabled = false
     public var liveEventsEnabled = true
     public var launchAtLogin = false
     public var maxAttachmentBytes = 100 * 1_024 * 1_024
     public var imsgOverridePath: String?
 
     public init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case writesEnabled
+        case confirmSends
+        case confirmReactions
+        case approvalNotificationsEnabled
+        case liveEventsEnabled
+        case launchAtLogin
+        case maxAttachmentBytes
+        case imsgOverridePath
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        writesEnabled = try values.decodeIfPresent(Bool.self, forKey: .writesEnabled) ?? true
+        confirmSends = try values.decodeIfPresent(Bool.self, forKey: .confirmSends) ?? true
+        confirmReactions = try values.decodeIfPresent(Bool.self, forKey: .confirmReactions) ?? true
+        approvalNotificationsEnabled = try values.decodeIfPresent(
+            Bool.self,
+            forKey: .approvalNotificationsEnabled
+        ) ?? false
+        liveEventsEnabled = try values.decodeIfPresent(Bool.self, forKey: .liveEventsEnabled) ?? true
+        launchAtLogin = try values.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false
+        maxAttachmentBytes = try values.decodeIfPresent(
+            Int.self,
+            forKey: .maxAttachmentBytes
+        ) ?? 100 * 1_024 * 1_024
+        imsgOverridePath = try values.decodeIfPresent(String.self, forKey: .imsgOverridePath)
+    }
 }
 
 public enum ActivityKind: String, Codable, Sendable {
