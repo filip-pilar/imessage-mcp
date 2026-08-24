@@ -18,7 +18,7 @@ fi
 
 case "${1:-}" in
     "")
-        swift test --package-path "$ROOT"
+        swift test --package-path "$ROOT" --no-parallel
         ;;
     --xcodebuild-tests)
         (

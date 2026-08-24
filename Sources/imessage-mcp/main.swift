@@ -131,6 +131,7 @@ do {
     let helloSemaphore = DispatchSemaphore(value: 0)
     let outputFinished = DispatchSemaphore(value: 0)
     let authenticated = LockedBool()
+    let inputFinished = LockedBool()
     let outputQueue = DispatchQueue(label: "com.openai.imessage-mcp.proxy.output")
     outputQueue.async {
         do {
@@ -152,6 +153,10 @@ do {
         }
         helloSemaphore.signal()
         outputFinished.signal()
+        if authenticated.value && !inputFinished.value {
+            writeStderr("The authenticated iMessage MCP menu app disconnected.")
+            exit(1)
+        }
     }
 
     guard helloSemaphore.wait(timeout: .now() + 5) == .success,
@@ -163,6 +168,7 @@ do {
         try connection.writeLine(line)
         return true
     }
+    inputFinished.setTrue()
     connection.finishWriting()
     _ = outputFinished.wait(timeout: .now() + 2)
     connection.shutdown()

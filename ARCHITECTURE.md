@@ -39,6 +39,13 @@ The MCP processor implements JSON-RPC lifecycle, ping, tools, resources,
 resource subscriptions, and logging level negotiation. It advertises MCP
 `2025-11-25` and accepts `2025-06-18` and `2025-03-26` clients.
 
+Outstanding request IDs are unique within a session. Per-session and
+broker-wide in-flight limits, plus a pending-approval limit, reject overload
+explicitly rather than accumulating blocked work. Cancellation and disconnect
+wake both approval waits and live-event waits. Broker shutdown stops accepting
+new work, cancels sessions, and waits a bounded 65 seconds for accepted workers
+to release write resources.
+
 Each app launch creates a random 256-bit token. The socket path includes the
 current uid and is mode `0600`; the connection descriptor containing the token
 is stored mode `0600` under the app-support directory. A client must complete
@@ -61,15 +68,30 @@ contains private IMCore commands.
   and `imessage://status`, so database, permission, watcher, and client state
   describe the running app rather than configuration alone.
 - Live message/reaction payloads remain in a bounded in-memory buffer.
-- Live cursors combine an app-session identity with an event position, so a
-  restart is reported as cursor expiration rather than mistaken for inactivity.
+- Live cursors combine a watcher-generation identity with an event position, so
+  an app restart or watcher continuity break is reported as cursor expiration
+  rather than mistaken for inactivity. This reports gaps honestly; it does not
+  provide crash-safe replay.
+- Watcher availability and its current cursor generation share one event-store
+  transition. Stale process generations cannot publish running state after stop
+  or restart.
 - Bounded message waits use an in-process condition and never create background
   or autonomous work after the MCP call returns.
-- Message bodies are not written to the activity log.
+- Activity persistence contains stable redacted summaries only; message bodies,
+  addresses, attachment names, and raw errors are excluded, and legacy entries
+  are sanitized or purged on load.
 - High-frequency live-event activity persistence is debounced.
-- Read attachments are restricted to Messages and imsg cache locations and
-  capped at 20 MB for MCP image content.
-- Outbound attachments must be regular files and default to a 100 MB cap.
+- Read attachments are opened component-by-component without following
+  symbolic links, restricted to Messages attachment roots and imsg's dedicated
+  conversion cache, validated and bounded on one descriptor, and capped at 20
+  MB for MCP image content.
+- Outbound attachments must be regular files and default to a 100 MB cap. A
+  bounded private copy is made before approval, checked again by file identity
+  immediately before execution, used for delivery, and removed afterward.
+  Cleanup failures are recorded as redacted activity and retried; startup safely
+  sweeps UUID-named abandoned stages without following links outside the
+  dedicated root. A hard process crash can leave a private mode-`0400` copy only
+  until the next successful startup sweep.
 - Sends and reactions are separately confirmable and fail closed on timeout.
 
 Environment overrides (`IMSG_PATH`, `IMESSAGE_MCP_HOME`,

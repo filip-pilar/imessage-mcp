@@ -8,6 +8,12 @@ case "$command" in
     ;;
   watch)
     trap 'exit 0' TERM INT
+    if [ -n "${IMESSAGE_MCP_FAKE_WATCH_EVENT:-}" ]; then
+      printf '%s\n' "$IMESSAGE_MCP_FAKE_WATCH_EVENT"
+    fi
+    if [ -n "${IMESSAGE_MCP_FAKE_WATCH_EXIT_STATUS:-}" ]; then
+      exit "$IMESSAGE_MCP_FAKE_WATCH_EXIT_STATUS"
+    fi
     while :; do sleep 30; done
     ;;
   rpc)

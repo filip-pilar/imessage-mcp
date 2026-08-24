@@ -1,4 +1,9 @@
 import Foundation
+import UniformTypeIdentifiers
+
+func contentTypeForFilename(_ url: URL) -> UTType {
+    UTType(filenameExtension: url.pathExtension) ?? .data
+}
 
 extension ToolService {
     func runJSON(_ arguments: [String], timeout: TimeInterval = 30) throws -> Any {
@@ -16,10 +21,6 @@ extension ToolService {
             )) ?? Data()
         let text = String(data: data, encoding: .utf8) ?? String(describing: value)
         return .text(text, structured: value)
-    }
-
-    func logRead(_ title: String, detail: String) {
-        activity.append(ActivityEntry(kind: .read, title: title, detail: detail))
     }
 
     func approvalLabel(chatID: Int64) -> String? {
@@ -104,21 +105,6 @@ extension ToolService {
         return nil
     }
 
-    func validateOutboundFile(_ path: String, maximumBytes: Int) throws {
-        let url = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
-        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-        guard values.isRegularFile == true else {
-            throw ToolServiceError.invalid(
-                "Attachment must be an existing regular file."
-            )
-        }
-        if (values.fileSize ?? 0) > maximumBytes {
-            throw ToolServiceError.invalid(
-                "Attachment exceeds the configured size limit."
-            )
-        }
-    }
-
     func mostRecentIncomingGUID(in value: Any) -> String? {
         let objects: [[String: Any]]
         if let array = value as? [[String: Any]] {
@@ -138,15 +124,5 @@ extension ToolService {
                     > (($1["created_at"] as? String) ?? "")
             }
             .first?["guid"] as? String
-    }
-
-    func resultCount(_ value: Any) -> Int {
-        if let array = value as? [Any] { return array.count }
-        if let dictionary = value as? [String: Any] {
-            for key in ["messages", "chats", "results"] {
-                if let array = dictionary[key] as? [Any] { return array.count }
-            }
-        }
-        return 0
     }
 }

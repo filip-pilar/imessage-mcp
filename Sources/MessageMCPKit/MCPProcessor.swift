@@ -1,12 +1,36 @@
 import Foundation
+import CoreFoundation
 
 public final class MCPConnectionSession: @unchecked Sendable {
+    private enum RequestPhase {
+        case prepared
+        case executing
+    }
+
+    private struct ActiveRequest {
+        let cancellation: ToolCallCancellation
+        var phase: RequestPhase
+    }
+
+    enum RequestAdmission {
+        case accepted(ToolCallCancellation)
+        case duplicate
+        case overloaded
+        case closed
+        case invalid
+    }
+
     private let lock = NSLock()
     private var subscriptions: Set<String> = []
     private var initializedStorage = false
     private var clientNameStorage = "MCP client"
+    private let maximumInFlightRequests: Int
+    private var activeRequests: [Data: ActiveRequest] = [:]
+    private var requestsClosed = false
 
-    public init() {}
+    public init(maximumInFlightRequests: Int = 8) {
+        self.maximumInFlightRequests = max(1, maximumInFlightRequests)
+    }
 
     public var initialized: Bool {
         lock.withLock { initializedStorage }
@@ -34,6 +58,90 @@ public final class MCPConnectionSession: @unchecked Sendable {
     public func isSubscribed(to uri: String) -> Bool {
         lock.withLock { subscriptions.contains(uri) }
     }
+
+    @discardableResult
+    public func prepareRequest(id: Any?) -> ToolCallCancellation? {
+        switch prepare(id: id) {
+        case .accepted(let cancellation): return cancellation
+        case .closed:
+            let cancellation = ToolCallCancellation()
+            cancellation.cancel()
+            return cancellation
+        case .duplicate, .overloaded, .invalid: return nil
+        }
+    }
+
+    func prepare(id: Any?) -> RequestAdmission {
+        guard let key = Self.requestKey(id) else { return .invalid }
+        return lock.withLock {
+            guard !requestsClosed else { return .closed }
+            guard activeRequests[key] == nil else { return .duplicate }
+            guard activeRequests.count < maximumInFlightRequests else { return .overloaded }
+            let cancellation = ToolCallCancellation()
+            activeRequests[key] = ActiveRequest(
+                cancellation: cancellation,
+                phase: .prepared
+            )
+            return .accepted(cancellation)
+        }
+    }
+
+    func claim(id: Any?) -> RequestAdmission {
+        guard let key = Self.requestKey(id) else { return .invalid }
+        return lock.withLock {
+            guard !requestsClosed else { return .closed }
+            if var existing = activeRequests[key] {
+                guard existing.phase == .prepared else { return .duplicate }
+                existing.phase = .executing
+                activeRequests[key] = existing
+                return .accepted(existing.cancellation)
+            }
+            guard activeRequests.count < maximumInFlightRequests else { return .overloaded }
+            let cancellation = ToolCallCancellation()
+            activeRequests[key] = ActiveRequest(
+                cancellation: cancellation,
+                phase: .executing
+            )
+            return .accepted(cancellation)
+        }
+    }
+
+    public func cancellation(for id: Any?) -> ToolCallCancellation? {
+        guard let key = Self.requestKey(id) else { return nil }
+        return lock.withLock { activeRequests[key]?.cancellation }
+    }
+
+    public func finishRequest(id: Any?) {
+        guard let key = Self.requestKey(id) else { return }
+        _ = lock.withLock { activeRequests.removeValue(forKey: key) }
+    }
+
+    public func cancelRequest(id: Any?) {
+        cancellation(for: id)?.cancel()
+    }
+
+    public func cancelAllRequests() {
+        let active = lock.withLock { () -> [ToolCallCancellation] in
+            requestsClosed = true
+            let values = activeRequests.values.map(\.cancellation)
+            activeRequests.removeAll()
+            return values
+        }
+        active.forEach { $0.cancel() }
+    }
+
+    private static func requestKey(_ id: Any?) -> Data? {
+        guard let id, !(id is NSNull) else { return nil }
+        let object: [String: Any] = ["id": id]
+        guard JSONSerialization.isValidJSONObject(object) else { return nil }
+        return try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+}
+
+public enum MCPToolCallPreparation: Sendable {
+    case notAsynchronousToolCall
+    case accepted
+    case rejected(Data)
 }
 
 public final class MCPProcessor: @unchecked Sendable {
@@ -50,7 +158,84 @@ public final class MCPProcessor: @unchecked Sendable {
         self.statusProvider = statusProvider
     }
 
+    public func prepareAsynchronousToolCall(
+        line: Data,
+        session: MCPConnectionSession
+    ) -> MCPToolCallPreparation {
+        guard
+            let request = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+            request["method"] as? String == "tools/call",
+            Self.isValidRequestID(request["id"]),
+            let params = request["params"] as? [String: Any],
+            params["name"] is String,
+            params["arguments"] == nil || params["arguments"] is [String: Any]
+        else { return .notAsynchronousToolCall }
+        switch session.prepare(id: request["id"]) {
+        case .accepted:
+            return .accepted
+        case .duplicate:
+            return .rejected(errorResponse(
+                id: request["id"] ?? NSNull(),
+                code: -32600,
+                message: "Duplicate outstanding request id."
+            ))
+        case .overloaded:
+            return .rejected(errorResponse(
+                id: request["id"] ?? NSNull(),
+                code: -32001,
+                message: "This MCP connection has too many in-flight tool calls."
+            ))
+        case .closed:
+            return .rejected(errorResponse(
+                id: request["id"] ?? NSNull(),
+                code: -32000,
+                message: "The MCP connection is closed."
+            ))
+        case .invalid:
+            return .notAsynchronousToolCall
+        }
+    }
+
+    func rejectPreparedToolCallForOverload(
+        line: Data,
+        session: MCPConnectionSession
+    ) -> Data? {
+        guard
+            let request = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+            Self.isValidRequestID(request["id"])
+        else { return nil }
+        session.finishRequest(id: request["id"])
+        return errorResponse(
+            id: request["id"] ?? NSNull(),
+            code: -32001,
+            message: "The iMessage MCP broker has too many in-flight tool calls."
+        )
+    }
+
+    func finishAsynchronousToolCall(
+        line: Data,
+        session: MCPConnectionSession
+    ) {
+        guard
+            let request = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+            Self.isValidRequestID(request["id"])
+        else { return }
+        session.finishRequest(id: request["id"])
+    }
+
     public func process(line: Data, session: MCPConnectionSession) -> Data? {
+        process(
+            line: line,
+            session: session,
+            finishRequestWhenComplete: true
+        )
+    }
+
+    func process(
+        line: Data,
+        session: MCPConnectionSession,
+        finishRequestWhenComplete: Bool = true
+    ) -> Data? {
         do {
             guard let request = try JSONSerialization.jsonObject(with: line) as? [String: Any] else {
                 return errorResponse(id: NSNull(), code: -32600, message: "Invalid Request")
@@ -87,7 +272,11 @@ public final class MCPProcessor: @unchecked Sendable {
                         """,
                 ])
 
-            case "notifications/initialized", "notifications/cancelled":
+            case "notifications/initialized":
+                return nil
+
+            case "notifications/cancelled":
+                session.cancelRequest(id: params["requestId"])
                 return nil
 
             case "ping":
@@ -99,11 +288,68 @@ public final class MCPProcessor: @unchecked Sendable {
                 ])
 
             case "tools/call":
+                guard Self.isValidRequestID(id) else {
+                    return errorResponse(
+                        id: id ?? NSNull(),
+                        code: -32600,
+                        message: "Tool calls require a non-null string or numeric request id."
+                    )
+                }
                 guard let name = params["name"] as? String else {
                     return errorResponse(id: id ?? NSNull(), code: -32602, message: "Tool name is required.")
                 }
-                let arguments = params["arguments"] as? [String: Any] ?? [:]
-                let result = tools.call(name: name, arguments: arguments)
+                let arguments: [String: Any]
+                if let rawArguments = params["arguments"] {
+                    guard let decoded = rawArguments as? [String: Any] else {
+                        return errorResponse(
+                            id: id ?? NSNull(),
+                            code: -32602,
+                            message: "Tool arguments must be an object."
+                        )
+                    }
+                    arguments = decoded
+                } else {
+                    arguments = [:]
+                }
+                let cancellation: ToolCallCancellation
+                switch session.claim(id: id) {
+                case .accepted(let admitted):
+                    cancellation = admitted
+                case .duplicate:
+                    return errorResponse(
+                        id: id ?? NSNull(),
+                        code: -32600,
+                        message: "Duplicate outstanding request id."
+                    )
+                case .overloaded:
+                    return errorResponse(
+                        id: id ?? NSNull(),
+                        code: -32001,
+                        message: "This MCP connection has too many in-flight tool calls."
+                    )
+                case .closed:
+                    return errorResponse(
+                        id: id ?? NSNull(),
+                        code: -32000,
+                        message: "The MCP connection is closed."
+                    )
+                case .invalid:
+                    return errorResponse(
+                        id: id ?? NSNull(),
+                        code: -32600,
+                        message: "Tool calls require a valid request id."
+                    )
+                }
+                defer {
+                    if finishRequestWhenComplete {
+                        session.finishRequest(id: id)
+                    }
+                }
+                let result = tools.call(
+                    name: name,
+                    arguments: arguments,
+                    context: ToolCallContext(cancellation: cancellation)
+                )
                 return response(id: id ?? NSNull(), result: result.jsonObject)
 
             case "resources/list":
@@ -204,5 +450,11 @@ public final class MCPProcessor: @unchecked Sendable {
 
     private static func encode(_ value: [String: Any]) -> Data {
         (try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])) ?? Data("{}".utf8)
+    }
+
+    private static func isValidRequestID(_ id: Any?) -> Bool {
+        if id is String { return true }
+        guard let number = id as? NSNumber else { return false }
+        return CFGetTypeID(number) != CFBooleanGetTypeID()
     }
 }

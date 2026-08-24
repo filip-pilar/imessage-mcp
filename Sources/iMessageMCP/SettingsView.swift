@@ -290,7 +290,8 @@ private struct ActivitySettingsView: View {
         VStack(alignment: .leading, spacing: 18) {
             settingsHeader(
                 "Activity",
-                detail: "Local operation metadata. Message bodies are never stored here."
+                detail: "Redacted local operation summaries. Recipients, message bodies, "
+                    + "attachment names, and raw errors are not stored here."
             )
 
             ActivityList(entries: Array(model.activities.prefix(100)))

@@ -24,6 +24,10 @@ public enum AppPaths {
         applicationSupport.appendingPathComponent("activity.json")
     }
 
+    public static var outboundAttachmentStaging: URL {
+        applicationSupport.appendingPathComponent("outbound-attachments", isDirectory: true)
+    }
+
     public static var socketPath: String {
         if let override = ProcessInfo.processInfo.environment["IMESSAGE_MCP_SOCKET_PATH"], !override.isEmpty {
             return override
@@ -36,6 +40,12 @@ public enum AppPaths {
             at: applicationSupport,
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
+        )
+    }
+
+    public static func sweepAbandonedOutboundAttachments() throws {
+        _ = try SecureFileIO.sweepStagingDirectory(
+            at: outboundAttachmentStaging
         )
     }
 }

@@ -9,6 +9,9 @@ STANDALONE_ARCHIVE="$ROOT/dist/imessage-mcp-standalone-local-private.zip"
 CODEX_SKILLS_ROOT=${CODEX_SKILLS_ROOT:-"${CODEX_HOME:-$HOME/.codex}/skills"}
 PLUGIN_CREATOR="$CODEX_SKILLS_ROOT/.system/plugin-creator"
 SKILL_VALIDATOR="$CODEX_SKILLS_ROOT/.system/skill-creator/scripts/quick_validate.py"
+plugin_version=$(python3 -c \
+    'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])' \
+    "$PLUGIN_SOURCE/.codex-plugin/plugin.json")
 
 "$ROOT/scripts/sync-distributions.sh" --check
 python3 "$PLUGIN_CREATOR/scripts/validate_plugin.py" "$PLUGIN_SOURCE"
@@ -112,7 +115,7 @@ test "$(grep -c '^\[mcp_servers\.imessage\]$' \
 CODEX_HOME="$isolated_codex_home" codex plugin marketplace add "$marketplace"
 install_result=$(CODEX_HOME="$isolated_codex_home" \
     codex plugin add imessage-mcp@imessage-mcp-local --json)
-printf '%s\n' "$install_result" | grep -Fq '"version": "1.0.0-local.1"'
+printf '%s\n' "$install_result" | grep -Fq "\"version\": \"$plugin_version\""
 printf '%s\n' "$install_result" | grep -Fq '"name": "imessage-mcp"'
 
 collision_project="$test_root/collision"

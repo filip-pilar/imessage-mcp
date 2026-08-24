@@ -215,6 +215,16 @@ public struct LiveEventCursor: Equatable, Sendable {
     }
 }
 
+public struct LiveEventWatcherState: Equatable, Sendable {
+    public let isAvailable: Bool
+    public let latestCursor: LiveEventCursor
+
+    public init(isAvailable: Bool, latestCursor: LiveEventCursor) {
+        self.isAvailable = isAvailable
+        self.latestCursor = latestCursor
+    }
+}
+
 public struct LiveEventBatch: Equatable, Sendable {
     public let events: [LiveEvent]
     public let cursor: LiveEventCursor

@@ -57,7 +57,6 @@ require_value "imsg version" "$imsg_version"
 require_equal "App version" "$app_version" "$server_version"
 require_equal "Plugin base version" "$plugin_base_version" "$server_version"
 
-require_text "$ROOT/scripts/test-distributions.sh" "\"version\": \"$plugin_version\""
 require_text "$ROOT/README.md" "$imsg_version and exposes"
 require_text "$ROOT/THIRD_PARTY_NOTICES.md" "\`imsg\` $imsg_version"
 require_text "$ROOT/Tests/Fixtures/fake-imsg" "echo \"$imsg_version\""

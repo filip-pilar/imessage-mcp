@@ -386,10 +386,14 @@ struct MenuView: View {
         VStack(alignment: .leading, spacing: 10) {
             Label(request.title, systemImage: request.kind == .send ? "paperplane.fill" : "heart.fill")
                 .font(.subheadline.weight(.semibold))
-            Text(request.detail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(6)
+            ScrollView(.vertical) {
+                Text(request.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 180)
             HStack(alignment: .center) {
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                     let seconds = max(0, Int(ceil(request.expiresAt.timeIntervalSince(context.date))))

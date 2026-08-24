@@ -12,13 +12,14 @@ Watch one resolved Messages chat through bounded, read-only MCP calls.
 1. Call `check_setup`.
 2. Require `database_ready` and `live_events_running`; otherwise report the
    unavailable dependency and stop.
-3. Resolve exactly one chat:
+3. Retain the non-empty `latest_event_cursor` returned by `check_setup`. This
+   is the snapshot for future events; never call `get_new_messages` without a
+   cursor merely to obtain a snapshot.
+4. Resolve exactly one chat:
    - Use an explicit chat ID when supplied.
    - Otherwise call `list_chats` and match the requested name or participants.
    - If multiple chats remain plausible, ask one focused question. Never guess
      from recency alone.
-4. Call `get_new_messages` with no arguments and retain `latest_cursor` so the
-   watch begins after existing events.
 
 Keep phone numbers, email addresses, participant lists, and cursors out of
 routine responses unless an identifier is necessary to disambiguate the chat.
@@ -35,9 +36,8 @@ Handle the result:
 - `timeout`: report that no matching reply arrived during the bounded wait.
   Continue only when the user's request clearly covers another bounded wait;
   otherwise offer to wait again.
-- `cursor_expired`: disclose the unmonitored gap, call `get_new_messages` with
-  no arguments to snapshot a new `latest_cursor`, and resume only for future
-  messages.
+- `cursor_expired`: disclose the unmonitored gap, retain the returned
+  `latest_cursor` as the new snapshot, and resume only for future messages.
 - `watcher_unavailable`: report that live updates are not running and stop.
 
 Ignore outgoing messages, reactions, and other chats; `wait_for_message`

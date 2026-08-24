@@ -29,13 +29,11 @@ enum AutomationAccessState: String, Sendable {
     }
 }
 
-enum WritePolicyPreset: String, CaseIterable, Identifiable {
+enum WritePolicyPreset: String {
     case readOnly
     case confirmEveryWrite
     case allowWithoutAsking
     case custom
-
-    var id: Self { self }
 
     var title: String {
         switch self {
@@ -75,7 +73,10 @@ private final class RuntimeStatusStore: @unchecked Sendable {
         lock.withLock { transform(&state) }
     }
 
-    func jsonObject(settings: AppSettings, latestEventCursor: String) -> [String: Any] {
+    func jsonObject(
+        settings: AppSettings,
+        liveEvents: LiveEventWatcherState
+    ) -> [String: Any] {
         let current = lock.withLock { state }
         let formatter = ISO8601DateFormatter()
         var result: [String: Any] = [
@@ -85,7 +86,7 @@ private final class RuntimeStatusStore: @unchecked Sendable {
             "messages_automation": current.messagesAutomation.rawValue,
             "system_events_automation": current.systemEventsAutomation.rawValue,
             "live_events_enabled": settings.liveEventsEnabled,
-            "live_events_running": current.liveEventsRunning,
+            "live_events_running": liveEvents.isAvailable,
             "active_client_count": current.clients.count,
             "clients": current.clients.map {
                 [
@@ -97,7 +98,7 @@ private final class RuntimeStatusStore: @unchecked Sendable {
             "writes_enabled": settings.writesEnabled,
             "confirm_sends": settings.confirmSends,
             "confirm_reactions": settings.confirmReactions,
-            "latest_event_cursor": latestEventCursor,
+            "latest_event_cursor": liveEvents.latestCursor.rawValue,
             "sip_enabled_mode": true,
         ]
         if let lastClientConnectedAt = current.lastClientConnectedAt {
@@ -173,6 +174,7 @@ final class AppModel: ObservableObject {
     private let approvalNotifications = ApprovalNotificationCoordinator()
     private let runtimeStatus = RuntimeStatusStore()
     private var broker: BrokerServer?
+    private var tools: ToolService?
     private var watcher: WatchService?
     private var runner: IMsgRunner?
     private var token = ""
@@ -216,6 +218,7 @@ final class AppModel: ObservableObject {
         }
         do {
             try AppPaths.ensureDirectories()
+            try AppPaths.sweepAbandonedOutboundAttachments()
             let imsgURL = try resolveIMsgURL()
             let runner = IMsgRunner(executableURL: imsgURL)
             self.runner = runner
@@ -232,6 +235,8 @@ final class AppModel: ObservableObject {
                     self?.statusObject() ?? [:]
                 }
             )
+            try tools.prepareAttachmentStaging()
+            self.tools = tools
             let processor = MCPProcessor(tools: tools) { [weak self] in
                 self?.statusObject() ?? [:]
             }
@@ -259,12 +264,8 @@ final class AppModel: ObservableObject {
                         $0.initialized && !self.announcedClientIDs.contains($0.id)
                     }
                     self.announcedClientIDs.formUnion(newlyInitialized.map(\.id))
-                    for client in newlyInitialized {
-                        self.activityStore.append(ActivityEntry(
-                            kind: .diagnostic,
-                            title: "MCP client connected",
-                            detail: client.name
-                        ))
+                    for _ in newlyInitialized {
+                        self.activityStore.append(kind: .diagnostic)
                     }
                     self.syncClientRuntimeStatus()
                 }
@@ -276,6 +277,7 @@ final class AppModel: ObservableObject {
             try writeConnectionInfo()
 
             eventStore.onEvent = { [weak broker] _ in broker?.notifyEvent() }
+            eventStore.onInvalidated = { [weak broker] _ in broker?.notifyEvent() }
             let watcher = WatchService(executableURL: imsgURL, eventStore: eventStore, activity: activityStore)
             watcher.onStateChanged = { [weak self, runtimeStatus] running, error in
                 runtimeStatus.update { $0.liveEventsRunning = running }
@@ -294,12 +296,7 @@ final class AppModel: ObservableObject {
                 $0.brokerRunning = false
                 $0.databaseReady = false
             }
-            activityStore.append(ActivityEntry(
-                kind: .error,
-                title: "App failed to start",
-                detail: error.localizedDescription,
-                succeeded: false
-            ))
+            activityStore.append(kind: .error, succeeded: false)
         }
     }
 
@@ -307,7 +304,17 @@ final class AppModel: ObservableObject {
         approvalCenter.denyAll()
         approvalNotifications.clear()
         watcher?.stop()
-        broker?.stop()
+        let drained = broker?.stopAndDrain(timeout: 65) ?? true
+        if drained {
+            do {
+                try tools?.prepareAttachmentStaging()
+            } catch {
+                actionError = "Private attachment cleanup needs another retry after restart."
+            }
+        } else {
+            activityStore.append(kind: .error, succeeded: false)
+            actionError = "Timed out waiting for an active write to finish during shutdown."
+        }
         brokerRunning = false
         clients = []
         runtimeStatus.update {
@@ -325,17 +332,16 @@ final class AppModel: ObservableObject {
             do {
                 let version = try runner.run(arguments: ["--version"], timeout: 10)
                     .stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-                let chats = try runner.run(
+                _ = try runner.run(
                     arguments: ["chats", "--limit", "200", "--json"],
                     timeout: 15
-                ).jsonValue
+                )
                 DispatchQueue.main.async {
                     self?.imsgVersion = version
                     self?.databaseAccess = .granted
                     self?.statusMessage = "Ready"
                     self?.diagnosticError = nil
                     self?.runtimeStatus.update { $0.databaseReady = true }
-                    self?.watcher?.updateChatLabels(from: chats)
                     if self?.settings.liveEventsEnabled == true {
                         self?.watcher?.start()
                     }
@@ -368,7 +374,7 @@ final class AppModel: ObservableObject {
 
     func setWritePolicy(_ preset: WritePolicyPreset) {
         guard preset != .custom else { return }
-        updateSettings {
+        guard updateSettings({
             switch preset {
             case .readOnly:
                 $0.writesEnabled = false
@@ -383,11 +389,10 @@ final class AppModel: ObservableObject {
             case .custom:
                 break
             }
+        }) else { return }
+        if !settings.writesEnabled {
+            approvalCenter.denyAll()
         }
-    }
-
-    func setWritesEnabled(_ enabled: Bool) {
-        updateSettings { $0.writesEnabled = enabled }
     }
 
     func setConfirmSends(_ enabled: Bool) {
@@ -400,7 +405,7 @@ final class AppModel: ObservableObject {
 
     func setApprovalNotifications(_ enabled: Bool) {
         guard enabled else {
-            updateSettings { $0.approvalNotificationsEnabled = false }
+            guard updateSettings({ $0.approvalNotificationsEnabled = false }) else { return }
             approvalNotifications.update(pendingCount: approvals.count, enabled: false)
             return
         }
@@ -408,12 +413,12 @@ final class AppModel: ObservableObject {
     }
 
     func setLiveEvents(_ enabled: Bool) {
-        updateSettings { $0.liveEventsEnabled = enabled }
-        if enabled && databaseAccess == .granted {
+        guard updateSettings({ $0.liveEventsEnabled = enabled }) else { return }
+        if settings.liveEventsEnabled && databaseAccess == .granted {
             watcher?.start()
         } else {
             watcher?.stop()
-            if enabled {
+            if settings.liveEventsEnabled {
                 watcherError = "Grant Full Disk Access, then refresh diagnostics to start live updates."
             }
         }
@@ -426,7 +431,6 @@ final class AppModel: ObservableObject {
             } else {
                 try SMAppService.mainApp.unregister()
             }
-            updateSettings { $0.launchAtLogin = enabled }
             refreshLaunchAtLoginState()
             actionError = nil
         } catch {
@@ -465,24 +469,23 @@ final class AppModel: ObservableObject {
         let command = "codex mcp add imessage -- '\(escaped)'"
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(command, forType: .string)
-        activityStore.append(ActivityEntry(
-            kind: .diagnostic,
-            title: "Codex command copied",
-            detail: "Paste it into Terminal."
-        ))
+        activityStore.append(kind: .diagnostic)
     }
 
     func revealApp() {
         NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
     }
 
-    private func updateSettings(_ transform: (inout AppSettings) -> Void) {
+    @discardableResult
+    private func updateSettings(_ transform: (inout AppSettings) -> Void) -> Bool {
         do {
             try settingsStore.update(transform)
             settings = settingsStore.value
             actionError = nil
+            return true
         } catch {
             actionError = error.localizedDescription
+            return false
         }
     }
 
@@ -491,14 +494,27 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             do {
                 let granted = try await approvalNotifications.requestAuthorization()
-                updateSettings { $0.approvalNotificationsEnabled = granted }
-                approvalNotifications.update(pendingCount: approvals.count, enabled: granted)
+                guard updateSettings({ $0.approvalNotificationsEnabled = granted }) else {
+                    approvalNotifications.update(
+                        pendingCount: approvals.count,
+                        enabled: settings.approvalNotificationsEnabled
+                    )
+                    return
+                }
+                approvalNotifications.update(
+                    pendingCount: approvals.count,
+                    enabled: settings.approvalNotificationsEnabled
+                )
                 if !granted {
                     actionError = "Approval notifications are disabled in System Settings."
                 }
             } catch {
-                updateSettings { $0.approvalNotificationsEnabled = false }
-                approvalNotifications.update(pendingCount: approvals.count, enabled: false)
+                let persisted = updateSettings { $0.approvalNotificationsEnabled = false }
+                approvalNotifications.update(
+                    pendingCount: approvals.count,
+                    enabled: settings.approvalNotificationsEnabled
+                )
+                guard persisted else { return }
                 actionError = "Could not enable approval notifications: \(error.localizedDescription)"
             }
         }
@@ -539,7 +555,7 @@ final class AppModel: ObservableObject {
     nonisolated private func statusObject() -> [String: Any] {
         runtimeStatus.jsonObject(
             settings: settingsStore.value,
-            latestEventCursor: eventStore.latestCursor.rawValue
+            liveEvents: eventStore.watcherState
         )
     }
 
@@ -552,10 +568,6 @@ final class AppModel: ObservableObject {
 
     private func refreshLaunchAtLoginState() {
         launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
-        if settings.launchAtLogin != launchAtLoginEnabled {
-            try? settingsStore.update { $0.launchAtLogin = launchAtLoginEnabled }
-            settings = settingsStore.value
-        }
     }
 
     private func openPreference(_ value: String) {

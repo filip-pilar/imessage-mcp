@@ -4,84 +4,177 @@ public final class WatchService: @unchecked Sendable {
     private let executableURL: URL
     private let eventStore: EventStore
     private let activity: ActivityStore
+    private let processEnvironment: [String: String]?
     private let stateLock = NSLock()
-    private let chatLabelsLock = NSLock()
+    private let transitionGate = NSRecursiveLock()
     private var process: Process?
     private var shouldRun = false
-    private var chatLabels: [Int64: String] = [:]
+    private var runGeneration = UUID()
+    private var stateRevision: UInt64 = 0
     private let queue = DispatchQueue(label: "com.openai.imessage-mcp.watch", qos: .utility)
-    public var onStateChanged: ((Bool, String?) -> Void)?
+    private let publicationQueue = DispatchQueue(
+        label: "com.openai.imessage-mcp.watch-state-publications"
+    )
+    private var beforePublishingRunningStorage: (@Sendable (UUID) -> Void)?
+    private var onStateChangedStorage: ((Bool, String?) -> Void)?
+
+    var beforePublishingRunning: (@Sendable (UUID) -> Void)? {
+        get { stateLock.withLock { beforePublishingRunningStorage } }
+        set { stateLock.withLock { beforePublishingRunningStorage = newValue } }
+    }
+
+    public var onStateChanged: ((Bool, String?) -> Void)? {
+        get { stateLock.withLock { onStateChangedStorage } }
+        set { stateLock.withLock { onStateChangedStorage = newValue } }
+    }
 
     public init(executableURL: URL, eventStore: EventStore, activity: ActivityStore) {
         self.executableURL = executableURL
         self.eventStore = eventStore
         self.activity = activity
+        self.processEnvironment = nil
+    }
+
+    init(
+        executableURL: URL,
+        eventStore: EventStore,
+        activity: ActivityStore,
+        processEnvironment: [String: String]
+    ) {
+        self.executableURL = executableURL
+        self.eventStore = eventStore
+        self.activity = activity
+        self.processEnvironment = processEnvironment
     }
 
     public var isRunning: Bool {
         stateLock.withLock { process?.isRunning == true }
     }
 
+    @available(*, deprecated, message: "Activity history no longer retains conversation labels.")
     public func updateChatLabels(from value: Any) {
-        let labels = Self.chatLabels(from: value)
-        chatLabelsLock.withLock { chatLabels = labels }
+        // Kept as a source-compatible no-op. Retaining these labels would
+        // conflict with the redacted activity-store boundary.
     }
 
     public func start() {
-        let startNeeded = stateLock.withLock { () -> Bool in
-            guard !shouldRun else { return false }
-            shouldRun = true
-            return true
+        let generation: UUID? = withTransitionGate {
+            let transition = stateLock.withLock {
+                () -> (generation: UUID, state: LiveEventWatcherState, revision: UInt64)? in
+                guard !shouldRun else { return nil }
+                shouldRun = true
+                runGeneration = UUID()
+                stateRevision &+= 1
+                return (
+                    runGeneration,
+                    eventStore.beginWatcherGeneration(runGeneration),
+                    stateRevision
+                )
+            }
+            guard let transition else { return nil }
+            enqueueStatePublication(
+                running: false,
+                error: nil,
+                revision: transition.revision
+            )
+            enqueueInvalidationPublication(transition.state.latestCursor)
+            return transition.generation
         }
-        guard startNeeded else { return }
-        queue.async { [weak self] in self?.runLoop() }
+        guard let generation else { return }
+        queue.async { [weak self] in self?.runLoop(generation: generation) }
     }
 
     public func stop() {
-        let current = stateLock.withLock { () -> Process? in
-            shouldRun = false
-            return process
+        let transition = withTransitionGate {
+            let transition = stateLock.withLock {
+                () -> (
+                    process: Process?,
+                    state: LiveEventWatcherState?,
+                    revision: UInt64?
+                ) in
+                let wasEnabled = shouldRun
+                let generation = runGeneration
+                shouldRun = false
+                runGeneration = UUID()
+                guard wasEnabled,
+                    let state = eventStore.endWatcherGeneration(generation)
+                else { return (process, nil, nil) }
+                stateRevision &+= 1
+                return (process, state, stateRevision)
+            }
+            if let revision = transition.revision,
+                let state = transition.state
+            {
+                enqueueStatePublication(
+                    running: false,
+                    error: nil,
+                    revision: revision
+                )
+                enqueueInvalidationPublication(state.latestCursor)
+            }
+            return transition
         }
-        current?.terminate()
-        onStateChanged?(false, nil)
+        transition.process?.terminate()
     }
 
-    private func runLoop() {
+    private func runLoop(generation: UUID) {
         var retryDelay: TimeInterval = 1
         var lastLoggedFailure: String?
-        while stateLock.withLock({ shouldRun }) {
+        while shouldContinue(generation) {
             do {
-                try runOnce()
-                retryDelay = 1
+                try runOnce(generation: generation)
             } catch {
+                let transition: (state: LiveEventWatcherState, revision: UInt64)? =
+                    withTransitionGate {
+                        let transition = stateLock.withLock {
+                            () -> (state: LiveEventWatcherState, revision: UInt64)? in
+                            guard shouldRun, runGeneration == generation,
+                                let state = eventStore.breakWatcherContinuity(
+                                    generation: generation
+                                )
+                            else { return nil }
+                            stateRevision &+= 1
+                            return (state, stateRevision)
+                        }
+                        guard let transition else { return nil }
+                        enqueueStatePublication(
+                            running: false,
+                            error: error.localizedDescription,
+                            revision: transition.revision
+                        )
+                        enqueueInvalidationPublication(transition.state.latestCursor)
+                        return transition
+                    }
+                guard transition != nil else { return }
                 let message = error.localizedDescription
                 if message != lastLoggedFailure {
-                    activity.append(ActivityEntry(
-                        kind: .error,
-                        title: "Live updates paused",
-                        detail: message,
-                        succeeded: false
-                    ))
+                    activity.append(kind: .error, succeeded: false)
                     lastLoggedFailure = message
                 }
-                onStateChanged?(false, message)
-                guard stateLock.withLock({ shouldRun }) else { return }
+                guard shouldContinue(generation) else { return }
                 Thread.sleep(forTimeInterval: retryDelay)
                 retryDelay = min(retryDelay * 2, 30)
             }
         }
     }
 
-    private func runOnce() throws {
+    private func runOnce(generation: UUID) throws {
         guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
             throw IMsgRunnerError.executableMissing(executableURL.path)
         }
+        guard shouldContinue(generation) else { return }
         let process = Process()
         process.executableURL = executableURL
         process.arguments = [
             "watch", "--json", "--reactions", "--attachments", "--convert-attachments",
             "--debounce", "500ms",
         ]
+        if let processEnvironment {
+            process.environment = ProcessInfo.processInfo.environment.merging(
+                processEnvironment,
+                uniquingKeysWith: { _, override in override }
+            )
+        }
         let output = Pipe()
         let errors = Pipe()
         process.standardOutput = output
@@ -99,26 +192,70 @@ public final class WatchService: @unchecked Sendable {
         } catch {
             errors.fileHandleForReading.closeFile()
             errorRead.wait()
+            stateLock.withLock {
+                if self.process === process { self.process = nil }
+            }
             throw error
         }
-        onStateChanged?(true, nil)
+        guard shouldContinue(generation) else {
+            process.terminate()
+            process.waitUntilExit()
+            errorRead.wait()
+            stateLock.withLock {
+                if self.process === process { self.process = nil }
+            }
+            return
+        }
+        beforePublishingRunning?(generation)
+        let runningState = withTransitionGate {
+            let transition = stateLock.withLock {
+                () -> (sessionID: UUID, revision: UInt64)? in
+                guard shouldRun, runGeneration == generation,
+                    let state = eventStore.publishWatcherAvailable(generation: generation)
+                else { return nil }
+                stateRevision &+= 1
+                return (state.latestCursor.sessionID, stateRevision)
+            }
+            if let transition {
+                enqueueStatePublication(
+                    running: true,
+                    error: nil,
+                    revision: transition.revision
+                )
+            }
+            return transition
+        }
+        guard let runningState else {
+            process.terminate()
+            process.waitUntilExit()
+            errorRead.wait()
+            stateLock.withLock {
+                if self.process === process { self.process = nil }
+            }
+            return
+        }
+        let eventGeneration = runningState.sessionID
 
         try FileDescriptorLineReader.readLines(
             fileDescriptor: output.fileHandleForReading.fileDescriptor
         ) { line in
+            guard self.shouldContinue(generation) else { return false }
             guard let text = String(data: line, encoding: .utf8) else { return true }
             guard (try? JSONSerialization.jsonObject(with: line)) != nil else { return true }
-            eventStore.append(payload: text)
-            let labels = chatLabelsLock.withLock { chatLabels }
-            activity.appendDebounced(Self.activityEntry(for: line, chatLabels: labels))
+            guard eventStore.append(payload: text, ifSessionID: eventGeneration) != nil else {
+                return false
+            }
+            activity.appendDebounced(kind: .event)
             return true
         }
         if process.isRunning { process.terminate() }
         process.waitUntilExit()
         errorRead.wait()
-        stateLock.withLock { self.process = nil }
-        onStateChanged?(false, nil)
-        if process.terminationStatus != 0 && stateLock.withLock({ shouldRun }) {
+        stateLock.withLock {
+            if self.process === process { self.process = nil }
+        }
+        guard shouldContinue(generation) else { return }
+        if shouldContinue(generation) {
             let message = String(data: errorData.value, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             throw IMsgRunnerError.failed(
@@ -128,78 +265,48 @@ public final class WatchService: @unchecked Sendable {
         }
     }
 
-    static func activityEntry(
-        for data: Data,
-        chatLabels: [Int64: String]
-    ) -> ActivityEntry {
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return ActivityEntry(
-                kind: .event,
-                title: "Messages activity",
-                detail: "Message or reaction"
-            )
-        }
-        let chatID = Self.int64(object["chat_id"])
-        let eventLabel = Self.preferredLabel(in: object)
-        let cachedLabel = chatID.flatMap { chatLabels[$0] }
-        let chatLabel = eventLabel ?? cachedLabel
-        let detail: String
-        if let chatLabel, let chatID {
-            detail = "\(chatLabel) · Chat \(chatID)"
-        } else if let chatLabel {
-            detail = chatLabel
-        } else if let chatID {
-            detail = "Chat \(chatID)"
-        } else {
-            detail = "Messages"
-        }
-        let title: String
-        if object["is_reaction"] as? Bool == true {
-            title = "New reaction"
-        } else if object["is_from_me"] as? Bool == true {
-            title = "Message sent"
-        } else {
-            title = "New message"
-        }
-        return ActivityEntry(kind: .event, title: title, detail: detail)
+    private func shouldContinue(_ generation: UUID) -> Bool {
+        stateLock.withLock { shouldRun && runGeneration == generation }
     }
 
-    static func chatLabels(from value: Any) -> [Int64: String] {
-        var result: [Int64: String] = [:]
-        collectChatLabels(from: value, into: &result)
-        return result
-    }
-
-    private static func collectChatLabels(from value: Any, into result: inout [Int64: String]) {
-        if let object = value as? [String: Any] {
-            if let chatID = int64(object["id"] ?? object["chat_id"]),
-               let label = preferredLabel(in: object) {
-                result[chatID] = label
+    private func enqueueStatePublication(
+        running: Bool,
+        error: String?,
+        revision: UInt64
+    ) {
+        publicationQueue.async { [weak self] in
+            guard let self else { return }
+            self.waitForTransitionBoundary()
+            let callback = self.stateLock.withLock {
+                self.stateRevision == revision
+                    ? self.onStateChangedStorage
+                    : nil
             }
-            for nested in object.values {
-                collectChatLabels(from: nested, into: &result)
-            }
-        } else if let values = value as? [Any] {
-            for nested in values {
-                collectChatLabels(from: nested, into: &result)
-            }
+            callback?(running, error)
         }
     }
 
-    private static func preferredLabel(in object: [String: Any]) -> String? {
-        for key in ["display_name", "name", "contact_name"] {
-            guard let raw = object[key] as? String else { continue }
-            let label = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !label.isEmpty, !label.hasPrefix("+"), !label.contains("@") else { continue }
-            return label
+    private func enqueueInvalidationPublication(_ cursor: LiveEventCursor) {
+        publicationQueue.async { [weak self] in
+            guard let self else { return }
+            self.waitForTransitionBoundary()
+            self.eventStore.publishInvalidation(cursor)
         }
-        return nil
     }
 
-    private static func int64(_ value: Any?) -> Int64? {
-        if let number = value as? NSNumber { return number.int64Value }
-        if let string = value as? String { return Int64(string) }
-        return nil
+    private func waitForTransitionBoundary() {
+        transitionGate.lock()
+        transitionGate.unlock()
+    }
+
+    private func withTransitionGate<T>(_ operation: () throws -> T) rethrows -> T {
+        transitionGate.lock()
+        defer { transitionGate.unlock() }
+        return try operation()
+    }
+
+    func waitForStatePublications() {
+        publicationQueue.sync {}
     }
 }
 

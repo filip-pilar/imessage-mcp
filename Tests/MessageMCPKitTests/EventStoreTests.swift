@@ -2,6 +2,14 @@ import Foundation
 import Testing
 @testable import MessageMCPKit
 
+private final class LockedWaitResult: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: LiveEventWaitResult?
+
+    var value: LiveEventWaitResult? { lock.withLock { storage } }
+    func set(_ value: LiveEventWaitResult?) { lock.withLock { storage = value } }
+}
+
 @Suite("Live event store")
 struct EventStoreTests {
     @Test("cursor encodes session and position")
@@ -74,5 +82,71 @@ struct EventStoreTests {
         #expect(cursor == store.latestCursor)
         #expect(Date().timeIntervalSince(started) >= 0.04)
         #expect(Date().timeIntervalSince(started) < 0.5)
+    }
+
+    @Test("invalidation rotates the generation, clears events, and notifies subscribers")
+    func invalidationBoundary() throws {
+        let store = EventStore()
+        let staleCursor = store.latestCursor
+        _ = store.append(payload: #"{"guid":"BEFORE-GAP"}"#)
+        let notified = DispatchSemaphore(value: 0)
+        store.onInvalidated = { cursor in
+            #expect(cursor.position == 0)
+            notified.signal()
+        }
+
+        let freshCursor = store.invalidate()
+        let staleBatch = try store.batch(after: staleCursor.rawValue, limit: 10)
+        let freshBatch = try store.batch(after: nil, limit: 10)
+
+        #expect(notified.wait(timeout: .now()) == .success)
+        #expect(freshCursor.sessionID != staleCursor.sessionID)
+        #expect(staleBatch.cursorExpired)
+        #expect(staleBatch.events.isEmpty)
+        #expect(!freshBatch.cursorExpired)
+        #expect(freshBatch.events.isEmpty)
+    }
+
+    @Test("invalidation wakes an active wait with cursor expired")
+    func invalidationWakesWaiter() throws {
+        let store = EventStore()
+        let staleCursor = store.latestCursor
+        let started = DispatchSemaphore(value: 0)
+        let finished = DispatchSemaphore(value: 0)
+        let result = LockedWaitResult()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            started.signal()
+            result.set(try? store.waitForEvents(after: staleCursor.rawValue, timeout: 5))
+            finished.signal()
+        }
+
+        #expect(started.wait(timeout: .now() + 1) == .success)
+        Thread.sleep(forTimeInterval: 0.02)
+        let freshCursor = store.invalidate()
+
+        #expect(finished.wait(timeout: .now() + 1) == .success)
+        guard let waitResult = result.value,
+              case .cursorExpired(let returnedCursor) = waitResult else {
+            Issue.record("Expected invalidation to expire the active wait.")
+            return
+        }
+        #expect(returnedCursor == freshCursor)
+    }
+
+    @Test("an old watcher generation cannot append after invalidation")
+    func staleGenerationAppend() throws {
+        let store = EventStore()
+        let staleSessionID = store.sessionID
+        _ = store.invalidate()
+
+        let appended = store.append(
+            payload: #"{"guid":"LATE-BUFFERED-EVENT"}"#,
+            ifSessionID: staleSessionID
+        )
+        let batch = try store.batch(after: nil, limit: 10)
+
+        #expect(appended == nil)
+        #expect(batch.events.isEmpty)
     }
 }

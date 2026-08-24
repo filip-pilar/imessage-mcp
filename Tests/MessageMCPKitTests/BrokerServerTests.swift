@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 @testable import MessageMCPKit
@@ -43,6 +44,34 @@ private final class ClientStatusInbox: @unchecked Sendable {
         }
         return false
     }
+}
+
+private final class BlockingAttachmentRunner: IMsgRunning, @unchecked Sendable {
+    let entered = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var stagedPathStorage: String?
+
+    var stagedPath: String? { lock.withLock { stagedPathStorage } }
+
+    func run(arguments: [String], timeout: TimeInterval) throws -> CommandOutput {
+        CommandOutput(stdout: #"{"ok":true}"# + "\n")
+    }
+
+    func rpc(method: String, params: [String: Any], timeout: TimeInterval) throws -> Any {
+        lock.withLock { stagedPathStorage = params["file"] as? String }
+        entered.signal()
+        _ = release.wait(timeout: .now() + 2)
+        return ["ok": true]
+    }
+}
+
+private final class LockedDrainResult: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: Bool?
+
+    var value: Bool? { lock.withLock { storage } }
+    func set(_ value: Bool) { lock.withLock { storage = value } }
 }
 
 @Suite("Authenticated MCP broker")
@@ -119,5 +148,248 @@ struct BrokerServerTests {
             return false
         }
         #expect(response["ok"] as? Bool == false)
+    }
+
+    @Test("disconnects a subscribed peer that stops reading")
+    func disconnectsStalledSubscriber() throws {
+        let env = try TestEnvironment()
+        let processor = MCPProcessor(tools: env.service(runner: FakeRunner())) { [:] }
+        let path = "/tmp/imessage-mcp-stalled-\(UUID().uuidString.prefix(8)).sock"
+        let broker = BrokerServer(socketPath: path, token: "secret", processor: processor)
+        try broker.start()
+        defer { broker.stop() }
+
+        let client = try UnixSocketClient.connect(path: path)
+        var receiveBuffer: Int32 = 1_024
+        #expect(Darwin.setsockopt(
+            client.fd,
+            SOL_SOCKET,
+            SO_RCVBUF,
+            &receiveBuffer,
+            socklen_t(MemoryLayout.size(ofValue: receiveBuffer))
+        ) == 0)
+
+        try client.writeLine(try JSONSerialization.data(withJSONObject: [
+            "type": "hello", "token": "secret",
+        ]))
+        #expect(try readOneJSON(from: client)["ok"] as? Bool == true)
+
+        try client.writeLine(try mcpRequest(id: 1, method: "resources/subscribe", params: [
+            "uri": MCPProcessor.eventsURI,
+        ]))
+        #expect(try readOneJSON(from: client)["id"] as? Int == 1)
+        #expect(broker.clientCount == 1)
+
+        let started = Date()
+        for _ in 0..<100_000 where broker.clientCount > 0 {
+            broker.notifyEvent()
+        }
+
+        #expect(broker.clientCount == 0)
+        #expect(Date().timeIntervalSince(started) < 5)
+    }
+
+    @Test("reads cancellation while a write approval is pending")
+    func cancellationDuringApproval() throws {
+        let env = try TestEnvironment()
+        let runner = FakeRunner()
+        let approvals = ApprovalCenter()
+        let approvalAppeared = DispatchSemaphore(value: 0)
+        approvals.onChange = { requests in
+            if !requests.isEmpty { approvalAppeared.signal() }
+        }
+        let processor = MCPProcessor(
+            tools: env.service(runner: runner, approvals: approvals)
+        ) { [:] }
+        let path = "/tmp/imessage-mcp-cancel-\(UUID().uuidString.prefix(8)).sock"
+        let broker = BrokerServer(socketPath: path, token: "secret", processor: processor)
+        try broker.start()
+        defer { broker.stop() }
+
+        let client = try UnixSocketClient.connect(path: path)
+        let inbox = LineInbox()
+        DispatchQueue.global().async {
+            try? client.readLines {
+                inbox.append($0)
+                return true
+            }
+        }
+        try client.writeLine(try JSONSerialization.data(withJSONObject: [
+            "type": "hello", "token": "secret",
+        ]))
+        #expect(try inbox.next()["ok"] as? Bool == true)
+
+        try client.writeLine(try mcpRequest(id: 41, method: "tools/call", params: [
+            "name": "send_message",
+            "arguments": ["to": "+441234567890", "text": "do not send"],
+        ]))
+        #expect(approvalAppeared.wait(timeout: .now() + 1) == .success)
+        try client.writeLine(try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": ["requestId": 41],
+        ]))
+
+        let response = try inbox.next()
+        let result = try #require(response["result"] as? [String: Any])
+        #expect(result["isError"] as? Bool == true)
+        #expect(runner.calls.isEmpty)
+        #expect(approvals.requests.isEmpty)
+    }
+
+    @Test("a client half-close cancels a pending write and drains its error response")
+    func halfCloseDuringApproval() throws {
+        let env = try TestEnvironment()
+        let runner = FakeRunner()
+        let approvals = ApprovalCenter()
+        let approvalAppeared = DispatchSemaphore(value: 0)
+        approvals.onChange = { requests in
+            if !requests.isEmpty { approvalAppeared.signal() }
+        }
+        let processor = MCPProcessor(
+            tools: env.service(runner: runner, approvals: approvals)
+        ) { [:] }
+        let path = "/tmp/imessage-mcp-half-close-\(UUID().uuidString.prefix(8)).sock"
+        let broker = BrokerServer(socketPath: path, token: "secret", processor: processor)
+        try broker.start()
+        defer { broker.stop() }
+
+        let client = try UnixSocketClient.connect(path: path)
+        let inbox = LineInbox()
+        DispatchQueue.global().async {
+            try? client.readLines {
+                inbox.append($0)
+                return true
+            }
+        }
+        try client.writeLine(try JSONSerialization.data(withJSONObject: [
+            "type": "hello", "token": "secret",
+        ]))
+        #expect(try inbox.next()["ok"] as? Bool == true)
+        try client.writeLine(try mcpRequest(id: 42, method: "tools/call", params: [
+            "name": "send_message",
+            "arguments": ["to": "+441234567890", "text": "do not send"],
+        ]))
+        #expect(approvalAppeared.wait(timeout: .now() + 1) == .success)
+
+        client.finishWriting()
+
+        let response = try inbox.next()
+        let result = try #require(response["result"] as? [String: Any])
+        #expect(result["isError"] as? Bool == true)
+        #expect(runner.calls.isEmpty)
+        #expect(approvals.requests.isEmpty)
+    }
+
+    @Test("global in-flight capacity returns overload while another write is pending")
+    func globalBackpressure() throws {
+        let env = try TestEnvironment()
+        let approvals = ApprovalCenter()
+        let approvalAppeared = DispatchSemaphore(value: 0)
+        approvals.onChange = { requests in
+            if !requests.isEmpty { approvalAppeared.signal() }
+        }
+        let processor = MCPProcessor(
+            tools: env.service(runner: FakeRunner(), approvals: approvals)
+        ) { [:] }
+        let path = "/tmp/imessage-mcp-overload-\(UUID().uuidString.prefix(8)).sock"
+        let broker = BrokerServer(
+            socketPath: path,
+            token: "secret",
+            processor: processor,
+            maximumInFlightToolCalls: 1
+        )
+        try broker.start()
+        defer { broker.stop() }
+
+        let client = try UnixSocketClient.connect(path: path)
+        let inbox = LineInbox()
+        DispatchQueue.global().async {
+            try? client.readLines {
+                inbox.append($0)
+                return true
+            }
+        }
+        try client.writeLine(try JSONSerialization.data(withJSONObject: [
+            "type": "hello", "token": "secret",
+        ]))
+        #expect(try inbox.next()["ok"] as? Bool == true)
+
+        try client.writeLine(try mcpRequest(id: 51, method: "tools/call", params: [
+            "name": "send_message",
+            "arguments": ["to": "+441234567890", "text": "pending"],
+        ]))
+        #expect(approvalAppeared.wait(timeout: .now() + 1) == .success)
+        try client.writeLine(try mcpRequest(id: 52, method: "tools/call", params: [
+            "name": "list_chats",
+            "arguments": [:],
+        ]))
+
+        let overloaded = try inbox.next()
+        #expect(overloaded["id"] as? Int == 52)
+        #expect(((overloaded["error"] as? [String: Any])?["code"] as? NSNumber)?.intValue == -32001)
+
+        try client.writeLine(try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": ["requestId": 51],
+        ]))
+        let cancelled = try inbox.next()
+        #expect(cancelled["id"] as? Int == 51)
+        #expect(((cancelled["result"] as? [String: Any])?["isError"] as? Bool) == true)
+    }
+
+    @Test("graceful stop drains accepted attachment workers before returning")
+    func stopDrainsAttachmentWorker() throws {
+        let env = try TestEnvironment()
+        try env.settings.update { $0.confirmSends = false }
+        let attachment = env.directory.appendingPathComponent("payload.txt")
+        try Data("private attachment bytes".utf8).write(to: attachment)
+        let runner = BlockingAttachmentRunner()
+        let processor = MCPProcessor(tools: env.service(runner: runner)) { [:] }
+        let path = "/tmp/imessage-mcp-drain-\(UUID().uuidString.prefix(8)).sock"
+        let broker = BrokerServer(socketPath: path, token: "secret", processor: processor)
+        try broker.start()
+
+        let client = try UnixSocketClient.connect(path: path)
+        try client.writeLine(try JSONSerialization.data(withJSONObject: [
+            "type": "hello", "token": "secret",
+        ]))
+        #expect(try readOneJSON(from: client)["ok"] as? Bool == true)
+        try client.writeLine(try mcpRequest(id: 61, method: "tools/call", params: [
+            "name": "send_message",
+            "arguments": [
+                "to": "+441234567890",
+                "file": attachment.path,
+            ],
+        ]))
+        #expect(runner.entered.wait(timeout: .now() + 1) == .success)
+        let stagedPath = try #require(runner.stagedPath)
+        #expect(FileManager.default.fileExists(atPath: stagedPath))
+
+        let drained = LockedDrainResult()
+        let stopped = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            drained.set(broker.stopAndDrain(timeout: 2))
+            stopped.signal()
+        }
+        #expect(stopped.wait(timeout: .now() + 0.05) == .timedOut)
+        runner.release.signal()
+
+        #expect(stopped.wait(timeout: .now() + 1) == .success)
+        #expect(drained.value == true)
+        #expect(!FileManager.default.fileExists(atPath: stagedPath))
+        #expect(!FileManager.default.fileExists(
+            atPath: URL(fileURLWithPath: stagedPath).deletingLastPathComponent().path
+        ))
+    }
+
+    private func readOneJSON(from connection: SocketLineConnection) throws -> [String: Any] {
+        var value: [String: Any] = [:]
+        try connection.readLines { line in
+            value = (try? JSONSerialization.jsonObject(with: line) as? [String: Any]) ?? [:]
+            return false
+        }
+        return value
     }
 }

@@ -14,13 +14,7 @@ extension ToolService {
         result["live_events_enabled"] = settings.value.liveEventsEnabled
         result["sip_enabled_mode"] = true
         result["advanced_imcore_tools_exposed"] = false
-        activity.append(
-            ActivityEntry(
-                kind: .diagnostic,
-                title: "Setup checked",
-                detail: "imsg \(version)"
-            )
-        )
+        activity.append(kind: .diagnostic)
         return jsonResult(result)
     }
 
@@ -31,24 +25,21 @@ extension ToolService {
         ]
         if bool(args, "unread_only", default: false) { command.append("--unread-only") }
         let result = try runJSON(command)
-        logRead(
-            "Listed chats",
-            detail: bool(args, "unread_only", default: false) ? "Unread only" : "Recent"
-        )
+        activity.append(kind: .read)
         return jsonResult(result)
     }
 
     func getChat(_ args: [String: Any]) throws -> ToolCallResult {
         let chatID = try int64(args, "chat_id", minimum: 1)
         let result = try runJSON(["group", "--chat-id", "\(chatID)"])
-        logRead("Read chat", detail: "Chat \(chatID)")
+        activity.append(kind: .read)
         return jsonResult(result)
     }
 
     func getChatBackground(_ args: [String: Any]) throws -> ToolCallResult {
         let chatID = try int64(args, "chat_id", minimum: 1)
         let result = try runJSON(["chat-background", "status", "--chat-id", "\(chatID)"])
-        logRead("Read chat background", detail: "Chat \(chatID)")
+        activity.append(kind: .read)
         return jsonResult(result)
     }
 
@@ -68,7 +59,7 @@ extension ToolService {
             command.append("--convert-attachments")
         }
         let result = try runJSON(command)
-        logRead("Read messages", detail: "Chat \(chatID)")
+        activity.append(kind: .read)
         return jsonResult(result)
     }
 
@@ -84,7 +75,7 @@ extension ToolService {
         let result = try runJSON([
             "search", "--query", query, "--match", match, "--limit", "\(limit)",
         ])
-        logRead("Searched messages", detail: "\(resultCount(result)) results")
+        activity.append(kind: .read)
         return jsonResult(result)
     }
 
@@ -95,23 +86,20 @@ extension ToolService {
         if let chatID = optionalInt64(args, "chat_id") { params["chat_id"] = chatID }
         if let zone = optionalString(args, "time_zone") { params["time_zone"] = zone }
         let result = try runner.rpc(method: "messages.stats", params: params, timeout: 30)
-        logRead(
-            "Calculated statistics",
-            detail: optionalInt64(args, "chat_id").map { "Chat \($0)" } ?? "All chats"
-        )
+        activity.append(kind: .read)
         return jsonResult(result)
     }
 
     func scheduled(_ args: [String: Any]) throws -> ToolCallResult {
         let limit = try int(args, "limit", default: 50, range: 1...200)
         let result = try runJSON(["scheduled", "list", "--limit", "\(limit)"])
-        logRead("Listed scheduled messages", detail: "\(resultCount(result)) results")
+        activity.append(kind: .read)
         return jsonResult(result)
     }
 
     func localAccounts() throws -> ToolCallResult {
         let result = try runJSON(["account", "--local"])
-        logRead("Listed local accounts", detail: "Historical Messages accounts")
+        activity.append(kind: .read)
         return jsonResult(result)
     }
 
@@ -126,44 +114,66 @@ extension ToolService {
             "note":
                 "Service is inferred from local history; the name is from this Mac's Contacts, not a live iMessage lookup.",
         ]
-        logRead("Looked up handle", detail: address)
+        activity.append(kind: .read)
         return jsonResult(result)
     }
 
     func readAttachment(_ args: [String: Any]) throws -> ToolCallResult {
+        try readAttachment(args, allowedRoots: Self.defaultAttachmentReadRoots)
+    }
+
+    func readAttachment(
+        _ args: [String: Any],
+        allowedRoots: [URL],
+        beforeRead: (() throws -> Void)? = nil
+    ) throws -> ToolCallResult {
         let rawPath = try requiredString(args, "path")
-        let url = URL(fileURLWithPath: rawPath).standardizedFileURL.resolvingSymlinksInPath()
-        guard
-            url.path.hasPrefix(
-                FileManager.default.homeDirectoryForCurrentUser.path
-                    + "/Library/Messages/Attachments/"
-            )
-                || url.path.hasPrefix(AppPaths.applicationSupport.path + "/")
-                || url.path.hasPrefix(
-                    FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].path
-                        + "/"
-                )
-        else {
+        guard NSString(string: rawPath).isAbsolutePath else {
+            throw ToolServiceError.invalid("Attachment path must be absolute.")
+        }
+        let url = URL(fileURLWithPath: NSString(string: rawPath).standardizingPath)
+        guard let root = allowedRoots.first(where: { Self.contains(url, root: $0) }) else {
             throw ToolServiceError.invalid(
-                "Only Messages attachments and imsg-generated cache files can be read."
+                "Only Messages attachments and imsg-generated converted attachments can be read."
             )
         }
-        let values = try url.resourceValues(
-            forKeys: [.isRegularFileKey, .fileSizeKey, .contentTypeKey]
-        )
-        guard values.isRegularFile == true else {
+        let maximumBytes = 20 * 1_024 * 1_024
+        let descriptor: SecureFileDescriptor
+        let metadata: SecureFileMetadata
+        do {
+            descriptor = try SecureFileIO.openFile(at: url, beneath: root)
+            metadata = try SecureFileIO.regularFileMetadata(
+                for: descriptor,
+                maximumBytes: maximumBytes
+            )
+        } catch SecureFileIOError.tooLarge {
+            throw ToolServiceError.invalid("Attachment is larger than the 20 MB MCP read limit.")
+        } catch SecureFileIOError.notRegular {
             throw ToolServiceError.invalid("Attachment is not a regular file.")
-        }
-        let size = values.fileSize ?? 0
-        guard size <= 20 * 1_024 * 1_024 else {
+        } catch {
             throw ToolServiceError.invalid(
-                "Attachment is larger than the 20 MB MCP read limit."
+                "Attachment could not be opened safely inside an allowed directory."
             )
         }
-        let type = values.contentType ?? UTType(filenameExtension: url.pathExtension)
-        if let type, type.conforms(to: .image) {
-            let data = try Data(contentsOf: url, options: .mappedIfSafe)
-            logRead("Read attachment", detail: "\(url.lastPathComponent) · \(size) bytes")
+        let size = metadata.byteCount
+        let type = contentTypeForFilename(url)
+        if type.conforms(to: .image) {
+            try beforeRead?()
+            let data: Data
+            do {
+                data = try SecureFileIO.read(
+                    from: descriptor,
+                    maximumBytes: maximumBytes
+                )
+            } catch SecureFileIOError.tooLarge {
+                throw ToolServiceError.invalid(
+                    "Attachment grew beyond the 20 MB MCP read limit while it was being read."
+                )
+            } catch {
+                throw ToolServiceError.invalid("Attachment could not be read safely.")
+            }
+            let returnedSize = data.count
+            activity.append(kind: .read)
             return ToolCallResult(
                 content: [
                     [
@@ -173,19 +183,57 @@ extension ToolService {
                     ],
                     [
                         "type": "text",
-                        "text": "\(url.lastPathComponent) (\(size) bytes)",
+                        "text": "\(url.lastPathComponent) (\(returnedSize) bytes)",
                     ],
                 ],
-                structuredContent: ["path": url.path, "bytes": size]
+                structuredContent: ["path": url.path, "bytes": returnedSize]
             )
         }
         let result: [String: Any] = [
             "path": url.path,
             "filename": url.lastPathComponent,
             "bytes": size,
-            "mime_type": type?.preferredMIMEType ?? "application/octet-stream",
+            "mime_type": type.preferredMIMEType ?? "application/octet-stream",
             "note": "The attachment is not an image, so only local file metadata is returned.",
         ]
         return jsonResult(result)
+    }
+
+    static var defaultAttachmentReadRoots: [URL] {
+        let fileManager = FileManager.default
+        return attachmentReadRoots(
+            homeDirectory: fileManager.homeDirectoryForCurrentUser
+        )
+    }
+
+    static func attachmentReadRoots(
+        homeDirectory: URL
+    ) -> [URL] {
+        let canonicalHome =
+            (try? SecureFileIO.canonicalExistingURL(homeDirectory.standardizedFileURL))
+            ?? homeDirectory.standardizedFileURL
+        return [
+            canonicalHome
+                .appendingPathComponent("Library/Messages/Attachments", isDirectory: true),
+            canonicalHome
+                .appendingPathComponent(
+                    "Library/Caches/imsg/converted-attachments",
+                    isDirectory: true
+                ),
+        ]
+    }
+
+    private static func contains(_ url: URL, root: URL) -> Bool {
+        let filePath = canonicalSystemAliasPath(url.path)
+        let rootPath = canonicalSystemAliasPath(root.path)
+        guard filePath != rootPath else { return true }
+        return filePath.hasPrefix(rootPath + "/")
+    }
+
+    private static func canonicalSystemAliasPath(_ path: String) -> String {
+        if path == "/var" || path.hasPrefix("/var/") {
+            return "/private" + path
+        }
+        return path
     }
 }

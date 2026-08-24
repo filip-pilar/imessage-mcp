@@ -6,6 +6,7 @@ public final class ToolService: @unchecked Sendable {
     public let activity: ActivityStore
     public let events: EventStore
     public let approvals: ApprovalProviding
+    let attachmentStaging: AttachmentStagingManager
     let statusProvider: @Sendable () -> [String: Any]
 
     public init(
@@ -14,6 +15,7 @@ public final class ToolService: @unchecked Sendable {
         activity: ActivityStore,
         events: EventStore,
         approvals: ApprovalProviding,
+        outboundAttachmentStaging: URL = AppPaths.outboundAttachmentStaging,
         statusProvider: @escaping @Sendable () -> [String: Any] = { [:] }
     ) {
         self.runner = runner
@@ -21,10 +23,42 @@ public final class ToolService: @unchecked Sendable {
         self.activity = activity
         self.events = events
         self.approvals = approvals
+        self.attachmentStaging = AttachmentStagingManager(
+            root: outboundAttachmentStaging
+        )
         self.statusProvider = statusProvider
     }
 
-    public func call(name: String, arguments: [String: Any]) -> ToolCallResult {
+    public func prepareAttachmentStaging() throws {
+        do {
+            try attachmentStaging.prepare()
+        } catch {
+            activity.append(kind: .error, succeeded: false)
+            throw ToolServiceError.disabled(
+                "Private attachment cleanup could not finish safely. Retry after checking the app-support directory."
+            )
+        }
+    }
+
+    var attachmentCleanupPending: Bool {
+        attachmentStaging.cleanupPending
+    }
+
+    func finishStagedAttachment(_ attachment: CanonicalAttachment) {
+        guard attachmentStaging.finish(
+            file: attachment.stagedURL,
+            directory: attachment.stagingDirectoryURL
+        ) else {
+            activity.append(kind: .error, succeeded: false)
+            return
+        }
+    }
+
+    public func call(
+        name: String,
+        arguments: [String: Any],
+        context: ToolCallContext = ToolCallContext()
+    ) -> ToolCallResult {
         do {
             switch name {
             case "check_setup": return try checkSetup()
@@ -38,23 +72,16 @@ public final class ToolService: @unchecked Sendable {
             case "list_local_accounts": return try localAccounts()
             case "lookup_handle": return try lookupHandle(arguments)
             case "get_new_messages": return try newMessages(arguments)
-            case "wait_for_message": return try waitForMessage(arguments)
+            case "wait_for_message": return try waitForMessage(arguments, context: context)
             case "read_attachment": return try readAttachment(arguments)
-            case "send_message": return try sendMessage(arguments)
-            case "react_to_latest": return try react(arguments)
+            case "send_message": return try sendMessage(arguments, context: context)
+            case "react_to_latest": return try react(arguments, context: context)
             case "get_send_status": return try sendStatus(arguments)
             default:
                 return .error("Unknown tool: \(name)")
             }
         } catch {
-            activity.append(
-                ActivityEntry(
-                    kind: .error,
-                    title: name,
-                    detail: error.localizedDescription,
-                    succeeded: false
-                )
-            )
+            activity.append(kind: .error, succeeded: false)
             return .error(error.localizedDescription)
         }
     }

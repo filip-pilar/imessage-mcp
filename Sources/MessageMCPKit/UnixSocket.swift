@@ -34,11 +34,25 @@ private func socketAddress(path: String) throws -> (sockaddr_un, socklen_t) {
 }
 
 public final class SocketLineConnection: @unchecked Sendable {
+    public static let defaultSendTimeout: TimeInterval = 1
+
     public let fd: Int32
     private let writeLock = NSLock()
 
+    @available(*, deprecated, message: "Use init(fd:sendTimeout:) to surface socket setup failures.")
     public init(fd: Int32) {
         self.fd = fd
+        try? Self.configure(fd: fd, sendTimeout: Self.defaultSendTimeout)
+    }
+
+    public init(fd: Int32, sendTimeout: TimeInterval?) throws {
+        self.fd = fd
+        do {
+            try Self.configure(fd: fd, sendTimeout: sendTimeout)
+        } catch {
+            Darwin.close(fd)
+            throw error
+        }
     }
 
     deinit {
@@ -78,6 +92,7 @@ public final class SocketLineConnection: @unchecked Sendable {
                         if errno == EINTR { continue }
                         throw UnixSocketError.system("write", errno)
                     }
+                    if count == 0 { throw UnixSocketError.disconnected }
                     offset += count
                 }
             }
@@ -90,6 +105,34 @@ public final class SocketLineConnection: @unchecked Sendable {
 
     public func finishWriting() {
         Darwin.shutdown(fd, SHUT_WR)
+    }
+
+    private static func configure(fd: Int32, sendTimeout: TimeInterval?) throws {
+        var noSignal: Int32 = 1
+        guard Darwin.setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_NOSIGPIPE,
+            &noSignal,
+            socklen_t(MemoryLayout.size(ofValue: noSignal))
+        ) == 0 else {
+            throw UnixSocketError.system("setsockopt(SO_NOSIGPIPE)", errno)
+        }
+
+        guard let sendTimeout else { return }
+        let seconds = max(0, sendTimeout)
+        var timeout = timeval()
+        timeout.tv_sec = Int(seconds)
+        timeout.tv_usec = Int32((seconds - floor(seconds)) * 1_000_000)
+        guard Darwin.setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_SNDTIMEO,
+            &timeout,
+            socklen_t(MemoryLayout.size(ofValue: timeout))
+        ) == 0 else {
+            throw UnixSocketError.system("setsockopt(SO_SNDTIMEO)", errno)
+        }
     }
 }
 
@@ -135,7 +178,15 @@ public final class UnixSocketListener: @unchecked Sendable {
                     if errno == EINTR { continue }
                     break
                 }
-                onAccept(SocketLineConnection(fd: clientFD))
+                do {
+                    onAccept(try SocketLineConnection(
+                        fd: clientFD,
+                        sendTimeout: SocketLineConnection.defaultSendTimeout
+                    ))
+                } catch {
+                    // SocketLineConnection closes the accepted descriptor if setup fails.
+                    continue
+                }
             }
         }
     }
@@ -168,6 +219,9 @@ public enum UnixSocketClient {
             Darwin.close(fd)
             throw UnixSocketError.system("connect", code)
         }
-        return SocketLineConnection(fd: fd)
+        return try SocketLineConnection(
+            fd: fd,
+            sendTimeout: SocketLineConnection.defaultSendTimeout
+        )
     }
 }

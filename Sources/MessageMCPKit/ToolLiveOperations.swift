@@ -19,12 +19,16 @@ extension ToolService {
         return jsonResult(result)
     }
 
-    func waitForMessage(_ args: [String: Any]) throws -> ToolCallResult {
+    func waitForMessage(
+        _ args: [String: Any],
+        context: ToolCallContext = ToolCallContext()
+    ) throws -> ToolCallResult {
+        try context.ensureActive()
         let chatID = try int64(args, "chat_id", minimum: 1)
         let timeout = try int(args, "timeout_seconds", default: 60, range: 1...90)
-        let status = statusProvider()
-        guard status["live_events_running"] as? Bool == true else {
-            let cursor = events.latestCursor.rawValue
+        let watcherState = events.watcherState
+        guard watcherState.isAvailable else {
+            let cursor = watcherState.latestCursor.rawValue
             return jsonResult([
                 "status": "watcher_unavailable",
                 "event": NSNull(),
@@ -33,14 +37,14 @@ extension ToolService {
             ])
         }
 
-        var cursor = optionalString(args, "cursor") ?? events.latestCursor.rawValue
+        var cursor = optionalString(args, "cursor") ?? watcherState.latestCursor.rawValue
         let deadline = Date().addingTimeInterval(TimeInterval(timeout))
 
         while true {
             let remaining = deadline.timeIntervalSinceNow
             guard remaining > 0 else {
                 let latest = events.latestCursor.rawValue
-                logRead("Waited for message", detail: "Chat \(chatID) · timeout")
+                activity.append(kind: .read)
                 return jsonResult([
                     "status": "timeout",
                     "event": NSNull(),
@@ -49,7 +53,11 @@ extension ToolService {
                 ])
             }
 
-            switch try events.waitForEvents(after: cursor, timeout: remaining) {
+            switch try events.waitForEvents(
+                after: cursor,
+                timeout: remaining,
+                cancellation: context.cancellation
+            ) {
             case .cursorExpired(let latest):
                 return jsonResult([
                     "status": "cursor_expired",
@@ -59,7 +67,7 @@ extension ToolService {
                 ])
 
             case .timedOut(let latest):
-                logRead("Waited for message", detail: "Chat \(chatID) · timeout")
+                activity.append(kind: .read)
                 return jsonResult([
                     "status": "timeout",
                     "event": NSNull(),
@@ -76,7 +84,7 @@ extension ToolService {
                             sessionID: batch.cursor.sessionID,
                             position: match.id
                         ).rawValue
-                    logRead("Waited for message", detail: "Chat \(chatID) · matched")
+                    activity.append(kind: .read)
                     return jsonResult([
                         "status": "matched",
                         "event": value,

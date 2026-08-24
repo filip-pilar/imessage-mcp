@@ -109,7 +109,7 @@ extension ToolService {
             name: "get_new_messages",
             title: "Get New Messages",
             description:
-                "Get buffered live message and reaction events after an opaque app-session cursor. An expired cursor is reported explicitly after an app restart.",
+                "Get buffered live message and reaction events after an opaque watcher cursor. An expired cursor is reported explicitly after app restart, watcher restart, or any continuity break.",
             inputSchema: objectSchema([
                 "cursor": string("Opaque cursor returned by this tool. Omit initially."),
                 "limit": integer("Maximum events.", minimum: 1, maximum: 200),
@@ -146,15 +146,14 @@ extension ToolService {
             name: "send_message",
             title: "Send Message",
             description:
-                "Send text and/or one attachment through Messages.app to an existing chat or a phone number, email or contact name.",
+                "Send text and/or one attachment through Messages.app to an existing chat, canonical E.164 phone number, or email address.",
             inputSchema: objectSchema(
                 [
                     "chat_id": integer("Existing chat row ID.", minimum: 1),
-                    "to": string("Phone number, email or contact name.", minLength: 1),
+                    "to": string("Canonical E.164 phone number or email address.", minLength: 1),
                     "text": string("Message body."),
                     "file": string("Absolute path to one attachment."),
                     "service": enumString("Delivery service.", values: ["auto", "imessage", "sms"]),
-                    "region": string("Default region used to normalize local phone numbers."),
                     "no_sms_fallback": boolean("Prevent fallback from iMessage to SMS."),
                 ], oneOfRequired: [["chat_id"], ["to"]]),
             readOnly: false,
@@ -172,8 +171,11 @@ extension ToolService {
                         "Standard tapback.",
                         values: ["love", "like", "dislike", "laugh", "emphasis", "question"]
                     ),
-                    "expected_message_guid": string("Optional GUID of the expected most recent incoming message."),
-                ], required: ["chat_id", "reaction"]),
+                    "expected_message_guid": string(
+                        "Exact GUID of the expected most recent incoming message.",
+                        minLength: 1
+                    ),
+                ], required: ["chat_id", "reaction", "expected_message_guid"]),
             readOnly: false,
             openWorld: true
         ),

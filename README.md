@@ -84,9 +84,9 @@ the unchanged app does not normally change its identity.
 | `lookup_handle` | Local service-history and Contacts lookup |
 | `get_new_messages` | Restart-detecting cursor over the live message/reaction buffer |
 | `wait_for_message` | Bounded 1–90 second wait for the next incoming message in one chat |
-| `read_attachment` | Image content or metadata for a returned attachment |
-| `send_message` | Text and/or one file to a chat, phone, email, or contact |
-| `react_to_latest` | One of six standard tapbacks to the latest inbound message |
+| `read_attachment` | Image content or metadata only from Messages attachments or the dedicated imsg conversion cache |
+| `send_message` | Text and/or one file to a chat ID, canonical E.164 phone number, or email address |
+| `react_to_latest` | One of six standard tapbacks when the required latest-message GUID still matches |
 | `get_send_status` | Pending/sent/delivered/failed state and available read date |
 
 Resources:
@@ -96,15 +96,17 @@ Resources:
   and policy state.
 
 Live events retain the latest 500 events in memory. Cursors include an opaque
-app-session identity. After a restart, tools return `cursor_expired` instead of
-silently waiting on a stale position; use bounded chat history to recover.
+watcher-generation identity. After an app restart or any watcher continuity
+break, tools return `cursor_expired` instead of silently waiting on a stale
+position; use bounded chat history to inspect the unmonitored gap.
 
 The proxy ignores connection descriptors whose app process no longer exists,
 launches the menu app to replace them, and rejects menu apps from an
 incompatible semantic major version with a clear error.
 
 `wait_for_message` waits only while its MCP call is active and never wakes a
-completed Codex task. It defaults to events arriving after the call begins,
+completed Codex task. Client cancellation or disconnect wakes the wait
+immediately. It defaults to events arriving after the call begins,
 ignores reactions and other chats, and returns `matched`, `timeout`,
 `cursor_expired`, or `watcher_unavailable`.
 
@@ -179,23 +181,34 @@ The menu presents three clear write modes:
 - **Allow Without Asking:** trusted clients can write immediately.
 
 The Settings window can customize message and tapback confirmation separately.
-Approvals show the resolved chat label, the exact preview, and an expiry
-countdown; they time out closed after 120 seconds. The menu-bar item shows the
-number of pending approvals. Optional local notifications show only a generic
-pending count and batch subsequent count changes without exposing message or
-recipient details.
+Approvals show the canonical target, full untruncated text, delivery service,
+SMS fallback behavior, exact tapback GUID, and canonical attachment metadata.
+Outbound attachment bytes are copied to a private, bounded staging file before
+approval and that exact copy is used for delivery. Normal shutdown drains
+accepted writes; failed or crash-interrupted cleanup is retried by a contained
+startup sweep. Approvals expire closed after 120 seconds. Allow Without Asking skips the dialog but
+uses the same strict intent validation and final policy, target, and attachment
+checks. The menu-bar item shows the number of pending approvals. Optional local
+notifications show only a generic pending count and batch subsequent count
+changes without exposing message or recipient details.
+
+The local broker rejects duplicate outstanding JSON-RPC IDs and applies bounded
+per-client, broker-wide, and pending-approval limits with explicit overload
+errors.
 
 For the least ambiguous send:
 
 - use a `chat_id` returned by `list_chats`, especially for groups;
 - use an E.164 phone number for a new direct recipient;
 - set `no_sms_fallback: true` when accidental SMS fallback is unacceptable;
-- pass `expected_message_guid` to `react_to_latest` so it fails if the latest
-  inbound message changed.
+- provide the required `expected_message_guid` to `react_to_latest`; the tool
+  rechecks it immediately before acting and fails if the target changed.
 
-Activity history stores operation type, target/chat identifier, client
-connections, status, and errors—not message bodies. Live-event persistence is
-debounced to avoid rewriting the activity file for every burst. It is kept locally in
+Activity history stores only stable redacted operation summaries. Recipients,
+message bodies, attachment names, client-provided details, and raw errors are
+not persisted; detailed errors remain transient in the tool response. Legacy
+activity is rewritten or purged on load. Live-event persistence is debounced to
+avoid rewriting the activity file for every burst. It is kept locally in
 `~/Library/Application Support/iMessage MCP/`.
 
 ## Honest macOS and imsg limits
