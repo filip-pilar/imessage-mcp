@@ -17,6 +17,11 @@ case "$command" in
     while :; do sleep 30; done
     ;;
   rpc)
+    if [ "${IMESSAGE_MCP_FAKE_BLOCK_RPC_STDIN:-}" = 1 ]; then
+      ulimit -t 3
+      trap 'exit 0' TERM
+      while :; do :; done
+    fi
     IFS= read -r request
     case "$request" in
       *message.send_status*)
@@ -29,6 +34,13 @@ case "$command" in
         echo '{"jsonrpc":"2.0","id":1,"result":{"ok":true}}'
         ;;
     esac
+    ;;
+  test-term-resistant)
+    test "$#" -eq 2
+    ulimit -t 3
+    printf '%s\n' "$$" > "$2"
+    trap '' TERM
+    while :; do :; done
     ;;
   status)
     echo '{"ok":true,"advanced":false}'
