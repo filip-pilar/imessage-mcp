@@ -54,8 +54,15 @@ the token handshake before MCP frames are processed.
 ## imsg boundary
 
 All CLI arguments are passed to `Process` as an argument array; no tool input is
-evaluated by a shell. Bounded one-shot processes isolate failures and enforce
-timeouts. The watcher is supervised and restarted with exponential backoff.
+evaluated by a shell. One-shot processes use one monotonic normal-work deadline
+covering launch, concurrent RPC stdin/stdout/stderr progress, and direct-child
+exit. Expiry cancels owned I/O, sends TERM, escalates to KILL after a fixed
+grace period, confirms/reaps the direct child, and joins parent-owned I/O before
+returning; mandatory cleanup can extend beyond the normal-work deadline. Normal
+and nonzero completion retains complete, unbounded output. This supervision
+does not promise descendant cleanup or output, concurrency, or aggregate-memory
+resource policy. The watcher is supervised and restarted with exponential
+backoff.
 
 The advanced bridge helper is removed during vendoring. This guarantees the
 shipped app stays on the SIP-enabled surface even though upstream imsg also

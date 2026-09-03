@@ -59,4 +59,52 @@ struct IMsgRunnerTests {
         ) as? [String: Any]
         #expect(result?["send_state"] as? String == "delivered")
     }
+
+    @Test("blocked RPC stdin times out without hanging")
+    func blockedRPCStdinTimesOut() throws {
+        let fixture = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/fake-imsg")
+        var environment = ProcessInfo.processInfo.environment
+        environment["IMESSAGE_MCP_FAKE_BLOCK_RPC_STDIN"] = "1"
+        let runner = IMsgRunner(executableURL: fixture, environment: environment)
+        let started = ContinuousClock.now
+
+        #expect(throws: IMsgRunnerError.timedOut) {
+            _ = try runner.rpc(
+                method: "test.blocked",
+                params: ["payload": String(repeating: "x", count: 1024 * 1024)],
+                timeout: 0.5
+            )
+        }
+        #expect(started.duration(to: .now) < .seconds(2))
+    }
+
+    @Test("TERM-resistant direct child is gone before return")
+    func termResistantChildIsGone() throws {
+        let fixture = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/fake-imsg")
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("imsg-runner-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let pidFile = directory.appendingPathComponent("pid")
+        let runner = IMsgRunner(executableURL: fixture)
+        let started = ContinuousClock.now
+
+        #expect(throws: IMsgRunnerError.timedOut) {
+            _ = try runner.run(arguments: ["test-term-resistant", pidFile.path], timeout: 0.6)
+        }
+        #expect(started.duration(to: .now) < .seconds(2))
+
+        let pidText = try String(contentsOf: pidFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let pid = try #require(pid_t(pidText))
+        errno = 0
+        #expect(kill(pid, 0) == -1)
+        #expect(errno == ESRCH)
+    }
 }
