@@ -1,9 +1,15 @@
 # iMessage MCP
 
-Let trusted AI clients securely read, search, monitor, send, and react to
-messages through macOS Messages.
+A standalone MCP server and native macOS menu-bar app for reading, searching,
+monitoring, sending, and reacting to messages through macOS Messages.
 
-A local MCP server and native macOS menu-bar app for Messages. It bundles
+**Status: limited maintenance.** No active feature development is planned.
+The repository remains public for existing users and as a reference. If your
+AI client already includes an iMessage integration, start there; use this
+project when you specifically want its standalone MCP server and local
+approval UI.
+
+It bundles
 [`imsg`](https://github.com/openclaw/imsg) 0.13.3 and exposes the useful
 SIP-enabled surface: local history, search, attachments, live events, sends,
 delivery-state inspection, and standard tapbacks.
